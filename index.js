@@ -10,7 +10,7 @@ app.use(express.json());
 const POLI_API_TOKEN = process.env.POLI_API_TOKEN;
 const CUSTOMER_ID = process.env.CUSTOMER_ID;
 const CHANNEL_ID = process.env.CHANNEL_ID;
-const TEMPLATE_ID = process.env.TEMPLATE_ID; // Usando o ID numérico do template
+const TEMPLATE_ID = process.env.TEMPLATE_ID;
 const OPERATOR_NAMES_MAP = process.env.OPERATOR_NAMES_MAP;
 
 const BASE_URL = "https://app.polichat.com.br/api/v1";
@@ -105,7 +105,8 @@ async function ensureContactExists(name, phone, propertyCode) {
 async function getContactDetails(contactId) {
   const url = `${BASE_URL}/customers/${CUSTOMER_ID}/contacts/${contactId}`;
   const response = await axios.get(url, { headers: API_HEADERS });
-  return response.data.data;
+  // CORREÇÃO FINAL APLICADA AQUI: Retorna o objeto de dados diretamente
+  return response.data;
 }
 
 async function assignContactToOperator(contactId, operatorId) {
@@ -118,7 +119,6 @@ async function assignContactToOperator(contactId, operatorId) {
 async function sendTemplateMessage(contactId, userId, contactName, operatorName) {
   const url = `${BASE_URL}/customers/${CUSTOMER_ID}/whatsapp/send_template/channels/${CHANNEL_ID}/contacts/${contactId}/users/${userId}`;
   const payload = {
-    // ALTERAÇÃO FINAL: Usando o ID numérico do template
     template: parseInt(TEMPLATE_ID),
     language: { policy: "deterministic", code: "pt_BR" },
     components: [{
