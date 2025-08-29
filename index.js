@@ -10,7 +10,7 @@ app.use(express.json());
 const POLI_API_TOKEN = process.env.POLI_API_TOKEN;
 const CUSTOMER_ID = process.env.CUSTOMER_ID;
 const CHANNEL_ID = process.env.CHANNEL_ID;
-const TEMPLATE_NAME = process.env.TEMPLATE_NAME;
+const TEMPLATE_ID = process.env.TEMPLATE_ID; // Usando o ID numérico do template
 const OPERATOR_NAMES_MAP = process.env.OPERATOR_NAMES_MAP;
 
 const BASE_URL = "https://app.polichat.com.br/api/v1";
@@ -39,7 +39,7 @@ app.get("/", (req, res) => {
 app.post("/", async (req, res) => {
   console.log("✅ Webhook da OLX recebido!");
 
-  if (!operatorIds || operatorIds.length === 0 || !CUSTOMER_ID || !CHANNEL_ID || !TEMPLATE_NAME || Object.keys(operatorNamesMap).length === 0) {
+  if (!operatorIds || operatorIds.length === 0 || !CUSTOMER_ID || !CHANNEL_ID || !TEMPLATE_ID || Object.keys(operatorNamesMap).length === 0) {
     console.error("❌ ERRO CRÍTICO: Uma ou mais variáveis de ambiente essenciais não estão configuradas ou estão vazias.");
     return res.status(500).json({ error: "Erro de configuração do servidor." });
   }
@@ -83,7 +83,7 @@ app.post("/", async (req, res) => {
 });
 
 // ===================================================================
-// FUNÇÕES AUXILIARES PARA INTERAGIR COM A API DO POLI DIGITAL
+// FUNÇÕES AUXILIARES
 // ===================================================================
 
 async function ensureContactExists(name, phone, propertyCode) {
@@ -105,8 +105,7 @@ async function ensureContactExists(name, phone, propertyCode) {
 async function getContactDetails(contactId) {
   const url = `${BASE_URL}/customers/${CUSTOMER_ID}/contacts/${contactId}`;
   const response = await axios.get(url, { headers: API_HEADERS });
-  // CORREÇÃO FINAL APLICADA AQUI: Retorna o objeto de dados diretamente
-  return response.data;
+  return response.data.data;
 }
 
 async function assignContactToOperator(contactId, operatorId) {
@@ -119,7 +118,8 @@ async function assignContactToOperator(contactId, operatorId) {
 async function sendTemplateMessage(contactId, userId, contactName, operatorName) {
   const url = `${BASE_URL}/customers/${CUSTOMER_ID}/whatsapp/send_template/channels/${CHANNEL_ID}/contacts/${contactId}/users/${userId}`;
   const payload = {
-    template: TEMPLATE_NAME,
+    // ALTERAÇÃO FINAL: Usando o ID numérico do template
+    template: parseInt(TEMPLATE_ID),
     language: { policy: "deterministic", code: "pt_BR" },
     components: [{
       type: "body",
