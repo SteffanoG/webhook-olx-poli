@@ -8,17 +8,31 @@ app.use(express.json());
 
 // --- Configurações da API do Poli Digital ---
 const POLI_API_TOKEN = process.env.POLI_API_TOKEN;
-const BASE_URL = "https://cs.poli.digital/api-cliente";
+const CUSTOMER_ID = process.env.CUSTOMER_ID;
+const CHANNEL_ID = process.env.CHANNEL_ID;
+const TEMPLATE_NAME = process.env.TEMPLATE_NAME || "abordagem2";
+
+const BASE_URL = "https://app.polichat.com.br/api/v1";
 const API_HEADERS = {
   Authorization: `Bearer ${POLI_API_TOKEN}`,
   "Content-Type": "application/json",
 };
 
-// --- Lógica de Distribuição de Atendentes ---
+// --- Lógica de Mapeamento e Distribuição de Atendentes ---
 const operatorIds = (process.env.OPERATOR_IDS || "").replace(/\s/g, '').split(',').filter(Boolean);
 
+// NOVO: Lê o mapa de Nomes de Operadores da variável de ambiente
+let operatorNamesMap = {};
+try {
+  operatorNamesMap = JSON.parse(process.env.OPERATOR_NAMES_MAP || "{}");
+} catch (e) {
+  console.error("ERRO CRÍTICO: Formato inválido na variável OPERATOR_NAMES_MAP. Deve ser um JSON.", e);
+}
+
+
+// Rota de Health Check
 app.get("/", (req, res) => {
-  res.send("🚀 Webhook para OLX Gestão Pro -> Poli Digital está no ar!");
+  res.sendStatus(200);
 });
 
 // ===================================================================
@@ -27,39 +41,47 @@ app.get("/", (req, res) => {
 app.post("/", async (req, res) => {
   console.log("✅ Webhook da OLX recebido!");
 
-  if (operatorIds.length === 0) {
-    console.error("❌ ERRO CRÍTICO: Nenhum ID de operador configurado na variável de ambiente OPERATOR_IDS.");
-    return res.status(500).json({ error: "Nenhum operador configurado para receber leads." });
+  // Validações
+  if (operatorIds.length === 0 || !CUSTOMER_ID || !CHANNEL_ID || !TEMPLATE_NAME || Object.keys(operatorNamesMap).length === 0) {
+    console.error("❌ ERRO CRÍTICO: Uma ou mais variáveis de ambiente essenciais não estão configuradas ou estão vazias.");
+    return res.status(500).json({ error: "Erro de configuração do servidor." });
   }
 
   const { name: leadName, phoneNumber, clientListingId: propertyCode } = req.body;
   if (!leadName || !phoneNumber || !propertyCode) {
-    console.error("❌ Erro: Dados essenciais (nome, telefone ou código do imóvel) ausentes no webhook.");
     return res.status(400).json({ error: "Dados essenciais do lead ausentes." });
   }
   const leadPhone = phoneNumber.replace(/\D/g, '');
 
   try {
-    const selectedOperatorId = operatorIds[Math.floor(Math.random() * operatorIds.length)];
-    console.log(`Lead de ${leadName} será atribuído ao operador com ID: ${selectedOperatorId}`);
+    const contactId = await ensureContactExists(leadName, leadPhone, propertyCode);
+    console.log(`Contato processado. ID: ${contactId}`);
 
-    const contatoId = await findOrCreateContact(leadName, leadPhone, propertyCode);
-    console.log(`Contato processado. ID do Contato: ${contatoId}`);
+    const contactDetails = await getContactDetails(contactId);
+    let assignedOperatorId = contactDetails.user_id;
 
-    await assignContactToOperator(contatoId, selectedOperatorId);
-    console.log(`Contato ${contatoId} atribuído ao operador ${selectedOperatorId}.`);
-
-    const chatId = await openChat(contatoId);
-    console.log(`Chat aberto para o contato ${contatoId}. ID do Chat: ${chatId}`);
-
-    await sendTemplateMessage(chatId, leadName);
-    console.log(`Template enviado para o chat ${chatId}.`);
+    if (assignedOperatorId) {
+      console.log(`Contato já atribuído ao operador ID: ${assignedOperatorId}.`);
+    } else {
+      console.log("Contato sem operador. Sorteando um novo...");
+      assignedOperatorId = operatorIds[Math.floor(Math.random() * operatorIds.length)];
+      await assignContactToOperator(contactId, assignedOperatorId);
+      console.log(`Contato ${contactId} atribuído ao novo operador ${assignedOperatorId}.`);
+    }
+    
+    // LÓGICA ATUALIZADA: Busca o nome do operador no mapa que criamos
+    const operatorName = operatorNamesMap[assignedOperatorId] || "um de nossos consultores";
+    console.log(`Nome do operador a ser usado no template: ${operatorName}`);
+    
+    await sendTemplateMessage(contactId, assignedOperatorId, leadName, operatorName);
+    console.log(`Template enviado para o contato ${contactId}.`);
 
     console.log("✅ Fluxo completo executado com sucesso!");
     res.status(200).json({ status: "Lead recebido e processado com sucesso." });
 
   } catch (error) {
-    console.error("❌ Erro durante o fluxo de processamento do lead no Poli:", error.message);
+    const errorMsg = error.response ? JSON.stringify(error.response.data) : error.message;
+    console.error("❌ Erro no fluxo:", errorMsg);
     res.status(500).json({ status: "Erro interno ao processar o lead." });
   }
 });
@@ -68,52 +90,54 @@ app.post("/", async (req, res) => {
 // FUNÇÕES AUXILIARES PARA INTERAGIR COM A API DO POLI DIGITAL
 // ===================================================================
 
-async function findOrCreateContact(name, phone, propertyCode) {
+async function ensureContactExists(name, phone, propertyCode) {
+  const url = `${BASE_URL}/customers/${CUSTOMER_ID}/contacts`;
+  const payload = { name: name, number: phone, cpf: propertyCode };
   try {
-    const response = await axios.get(`${BASE_URL}/chats/contato/numero/${phone}`, { headers: API_HEADERS });
-    console.log("Contato já existente encontrado.");
+    const response = await axios.post(url, payload, { headers: API_HEADERS });
+    console.log("Novo contato criado.");
     return response.data.id;
-  } catch (error) {
-    if (error.response && error.response.status === 404) {
-      console.log("Contato não encontrado. Criando um novo...");
-      const newContactPayload = {
-        nome: name,
-        numero: phone,
-        cpf: propertyCode,
-      };
-      const response = await axios.post(`${BASE_URL}/contatos`, newContactPayload, { headers: API_HEADERS });
-      return response.data.id;
+  } catch(error) {
+    if(error.response && error.response.data && error.response.data.id){
+       console.log("Contato já existente. Usando ID retornado.");
+       return error.response.data.id;
     }
-    throw new Error(`Erro ao buscar ou criar contato: ${error.message}`);
+    throw error;
   }
 }
 
+async function getContactDetails(contactId) {
+  const url = `${BASE_URL}/customers/${CUSTOMER_ID}/contacts/${contactId}`;
+  const response = await axios.get(url, { headers: API_HEADERS });
+  return response.data;
+}
+
 async function assignContactToOperator(contactId, operatorId) {
-  const payload = { atendenteId: operatorId };
-  await axios.put(`${BASE_URL}/chats/contato/${contactId}/atendente`, payload, { headers: API_HEADERS });
+  const url = `${BASE_URL}/customers/${CUSTOMER_ID}/contacts/redirect/contacts/${contactId}`;
+  const payload = { user_id: operatorId };
+  await axios.post(url, payload, { headers: API_HEADERS });
   return true;
 }
 
-async function openChat(contactId) {
-  const response = await axios.post(`${BASE_URL}/chats/contato/${contactId}/abrir`, null, { headers: API_HEADERS });
-  return response.data.id;
-}
-
-async function sendTemplateMessage(chatId, contactName) {
+async function sendTemplateMessage(contactId, userId, contactName, operatorName) {
+  const url = `${BASE_URL}/customers/${CUSTOMER_ID}/whatsapp/send_template/channels/${CHANNEL_ID}/contacts/${contactId}/users/${userId}`;
   const payload = {
-    template: "abordagem2",
-    parametros: [contactName],
+    template: TEMPLATE_NAME,
+    language: { policy: "deterministic", code: "pt_BR" },
+    components: [{
+      type: "body",
+      parameters: [
+        { type: "text", text: contactName },
+        { type: "text", text: operatorName }
+      ]
+    }]
   };
-  await axios.post(`${BASE_-URL}/chats/${chatId}/template`, payload, { headers: API_HEADERS });
+  await axios.post(url, payload, { headers: API_HEADERS });
   return true;
 }
 
 // Inicia o servidor
 const PORT = process.env.PORT || 3000;
-
-// ===================================================================
-// LINHA ALTERADA - Adicionamos '0.0.0.0'
-// ===================================================================
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`🚀 Servidor rodando na porta ${PORT}`);
 });
