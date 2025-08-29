@@ -10,7 +10,8 @@ app.use(express.json());
 const POLI_API_TOKEN = process.env.POLI_API_TOKEN;
 const CUSTOMER_ID = process.env.CUSTOMER_ID;
 const CHANNEL_ID = process.env.CHANNEL_ID;
-const TEMPLATE_NAME = process.env.TEMPLATE_NAME || "abordagem2";
+const TEMPLATE_NAME = process.env.TEMPLATE_NAME;
+const OPERATOR_NAMES_MAP = process.env.OPERATOR_NAMES_MAP;
 
 const BASE_URL = "https://app.polichat.com.br/api/v1";
 const API_HEADERS = {
@@ -20,18 +21,18 @@ const API_HEADERS = {
 
 // --- Lógica de Mapeamento e Distribuição de Atendentes ---
 const operatorIds = (process.env.OPERATOR_IDS || "").replace(/\s/g, '').split(',').filter(Boolean);
-
-// NOVO: Lê o mapa de Nomes de Operadores da variável de ambiente
 let operatorNamesMap = {};
 try {
-  operatorNamesMap = JSON.parse(process.env.OPERATOR_NAMES_MAP || "{}");
+  operatorNamesMap = JSON.parse(OPERATOR_NAMES_MAP || "{}");
 } catch (e) {
   console.error("ERRO CRÍTICO: Formato inválido na variável OPERATOR_NAMES_MAP. Deve ser um JSON.", e);
 }
 
-
-// Rota de Health Check
+// ===================================================================
+// ROTA DE VERIFICAÇÃO (HEALTH CHECK) - COM LOG DE DIAGNÓSTICO
+// ===================================================================
 app.get("/", (req, res) => {
+  console.log("🩺 Health check do Railway recebido!");
   res.sendStatus(200);
 });
 
@@ -40,9 +41,8 @@ app.get("/", (req, res) => {
 // ===================================================================
 app.post("/", async (req, res) => {
   console.log("✅ Webhook da OLX recebido!");
-
-  // Validações
-  if (operatorIds.length === 0 || !CUSTOMER_ID || !CHANNEL_ID || !TEMPLATE_NAME || Object.keys(operatorNamesMap).length === 0) {
+  // ... (o resto do código continua exatamente o mesmo)
+  if (!operatorIds || operatorIds.length === 0 || !CUSTOMER_ID || !CHANNEL_ID || !TEMPLATE_NAME || Object.keys(operatorNamesMap).length === 0) {
     console.error("❌ ERRO CRÍTICO: Uma ou mais variáveis de ambiente essenciais não estão configuradas ou estão vazias.");
     return res.status(500).json({ error: "Erro de configuração do servidor." });
   }
@@ -69,7 +69,6 @@ app.post("/", async (req, res) => {
       console.log(`Contato ${contactId} atribuído ao novo operador ${assignedOperatorId}.`);
     }
     
-    // LÓGICA ATUALIZADA: Busca o nome do operador no mapa que criamos
     const operatorName = operatorNamesMap[assignedOperatorId] || "um de nossos consultores";
     console.log(`Nome do operador a ser usado no template: ${operatorName}`);
     
@@ -87,7 +86,7 @@ app.post("/", async (req, res) => {
 });
 
 // ===================================================================
-// FUNÇÕES AUXILIARES PARA INTERAGIR COM A API DO POLI DIGITAL
+// FUNÇÕES AUXILIARES (sem alterações)
 // ===================================================================
 
 async function ensureContactExists(name, phone, propertyCode) {
