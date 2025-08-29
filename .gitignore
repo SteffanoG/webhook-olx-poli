@@ -1,0 +1,5 @@
+# Ignora a pasta de dependências
+node_modules
+
+# Ignora arquivos de variáveis de ambiente locais
+.env
