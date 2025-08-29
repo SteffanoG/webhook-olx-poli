@@ -91,12 +91,9 @@ async function ensureContactExists(name, phone, propertyCode) {
   const payload = { name: name, phone: phone, cpf: propertyCode };
   try {
     const response = await axios.post(url, payload, { headers: API_HEADERS });
-    
-    // LINHA DE DIAGNÓSTICO ADICIONADA
-    console.log("Resposta completa da criação de contato:", JSON.stringify(response.data, null, 2));
-
     console.log("Novo contato criado.");
-    return response.data.id; // Esta linha ainda está "errada", mas vamos corrigi-la no próximo passo
+    // CORREÇÃO FINAL APLICADA AQUI
+    return response.data.data.id;
   } catch(error) {
     if(error.response && error.response.data && error.response.data.id){
        console.log("Contato já existente. Usando ID retornado.");
@@ -109,7 +106,8 @@ async function ensureContactExists(name, phone, propertyCode) {
 async function getContactDetails(contactId) {
   const url = `${BASE_URL}/customers/${CUSTOMER_ID}/contacts/${contactId}`;
   const response = await axios.get(url, { headers: API_HEADERS });
-  return response.data;
+  // O objeto de contato está dentro de 'data', então retornamos ele
+  return response.data.data;
 }
 
 async function assignContactToOperator(contactId, operatorId) {
