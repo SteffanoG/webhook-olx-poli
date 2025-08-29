@@ -92,7 +92,6 @@ async function ensureContactExists(name, phone, propertyCode) {
   try {
     const response = await axios.post(url, payload, { headers: API_HEADERS });
     console.log("Novo contato criado.");
-    // CORREÇÃO FINAL APLICADA AQUI
     return response.data.data.id;
   } catch(error) {
     if(error.response && error.response.data && error.response.data.id){
@@ -106,8 +105,8 @@ async function ensureContactExists(name, phone, propertyCode) {
 async function getContactDetails(contactId) {
   const url = `${BASE_URL}/customers/${CUSTOMER_ID}/contacts/${contactId}`;
   const response = await axios.get(url, { headers: API_HEADERS });
-  // O objeto de contato está dentro de 'data', então retornamos ele
-  return response.data.data;
+  // CORREÇÃO FINAL APLICADA AQUI: Retorna o objeto de dados diretamente
+  return response.data;
 }
 
 async function assignContactToOperator(contactId, operatorId) {
