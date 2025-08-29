@@ -33,9 +33,8 @@ app.get("/", (req, res) => {
   res.sendStatus(200);
 });
 
-// ===================================================================
+
 // ROTA PRINCIPAL QUE RECEBE O WEBHOOK DA OLX
-// ===================================================================
 app.post("/", async (req, res) => {
   console.log("✅ Webhook da OLX recebido!");
 
@@ -82,9 +81,9 @@ app.post("/", async (req, res) => {
   }
 });
 
-// ===================================================================
+
 // FUNÇÕES AUXILIARES
-// ===================================================================
+
 
 async function ensureContactExists(name, phone, propertyCode) {
   const url = `${BASE_URL}/customers/${CUSTOMER_ID}/contacts`;
@@ -115,9 +114,8 @@ async function assignContactToOperator(contactId, operatorId) {
   return true;
 }
 
-// FUNÇÃO ATUALIZADA SEGUINDO A DOCUMENTAÇÃO
 async function sendTemplateMessage(contactId, userId, contactName, operatorName) {
-  const url = `${BASE_URL}/customers/${CUSTOMER_ID}/whatsapp/send_template/channels/${CHANNEL_ID}/contacts/${contactId}/users/${userId}`;
+  const url = `${BASE_URL}/customers/${CUSTOMER_ID}/whatsapp/send_template/channels/${CHANNEL_ID}/contacts/${contactId}/users/${user_id}`;
   
   // 1. Prepara os parâmetros como uma string de um array JSON
   const params = JSON.stringify([contactName, operatorName]);
