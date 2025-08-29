@@ -14,7 +14,7 @@ const TEMPLATE_ID = process.env.TEMPLATE_ID;
 const OPERATOR_NAMES_MAP = process.env.OPERATOR_NAMES_MAP;
 
 const BASE_URL = "https://app.polichat.com.br/api/v1";
-const API_HEADERS = {
+const API_HEADERS = { // Mantido para as outras chamadas de API
   Authorization: `Bearer ${POLI_API_TOKEN}`,
   "Content-Type": "application/json",
 };
@@ -70,7 +70,7 @@ app.post("/", async (req, res) => {
     console.log(`Nome do operador a ser usado no template: ${operatorName}`);
     
     await sendTemplateMessage(contactId, assignedOperatorId, leadName, operatorName);
-    console.log(`Template enviado para o contato ${contactId}.`);
+    console.log(`Template enviado com sucesso para o contato ${contactId}.`);
 
     console.log("✅ Fluxo completo executado com sucesso!");
     res.status(200).json({ status: "Lead recebido e processado com sucesso." });
@@ -105,8 +105,7 @@ async function ensureContactExists(name, phone, propertyCode) {
 async function getContactDetails(contactId) {
   const url = `${BASE_URL}/customers/${CUSTOMER_ID}/contacts/${contactId}`;
   const response = await axios.get(url, { headers: API_HEADERS });
-  // CORREÇÃO FINAL APLICADA AQUI: Retorna o objeto de dados diretamente
-  return response.data;
+  return response.data.data;
 }
 
 async function assignContactToOperator(contactId, operatorId) {
@@ -116,20 +115,25 @@ async function assignContactToOperator(contactId, operatorId) {
   return true;
 }
 
+// FUNÇÃO ATUALIZADA SEGUINDO A DOCUMENTAÇÃO
 async function sendTemplateMessage(contactId, userId, contactName, operatorName) {
   const url = `${BASE_URL}/customers/${CUSTOMER_ID}/whatsapp/send_template/channels/${CHANNEL_ID}/contacts/${contactId}/users/${userId}`;
-  const payload = {
-    template: parseInt(TEMPLATE_ID),
-    language: { policy: "deterministic", code: "pt_BR" },
-    components: [{
-      type: "body",
-      parameters: [
-        { type: "text", text: contactName },
-        { type: "text", text: operatorName }
-      ]
-    }]
+  
+  // 1. Prepara os parâmetros como uma string de um array JSON
+  const params = JSON.stringify([contactName, operatorName]);
+  
+  // 2. Prepara os dados no formato x-www-form-urlencoded
+  const data = new URLSearchParams();
+  data.append('quick_message_id', TEMPLATE_ID);
+  data.append('parameters', params);
+  
+  // 3. Prepara os headers com o Content-Type correto
+  const formHeaders = {
+    'Authorization': `Bearer ${POLI_API_TOKEN}`,
+    'Content-Type': 'application/x-www-form-urlencoded'
   };
-  await axios.post(url, payload, { headers: API_HEADERS });
+
+  await axios.post(url, data, { headers: formHeaders });
   return true;
 }
 
