@@ -28,11 +28,8 @@ try {
   console.error("ERRO CRÍTICO: Formato inválido na variável OPERATOR_NAMES_MAP. Deve ser um JSON.", e);
 }
 
-// ===================================================================
-// ROTA DE VERIFICAÇÃO (HEALTH CHECK) - COM LOG DE DIAGNÓSTICO
-// ===================================================================
+// Rota de Health Check
 app.get("/", (req, res) => {
-  console.log("🩺 Health check do Railway recebido!");
   res.sendStatus(200);
 });
 
@@ -41,7 +38,7 @@ app.get("/", (req, res) => {
 // ===================================================================
 app.post("/", async (req, res) => {
   console.log("✅ Webhook da OLX recebido!");
-  // ... (o resto do código continua exatamente o mesmo)
+
   if (!operatorIds || operatorIds.length === 0 || !CUSTOMER_ID || !CHANNEL_ID || !TEMPLATE_NAME || Object.keys(operatorNamesMap).length === 0) {
     console.error("❌ ERRO CRÍTICO: Uma ou mais variáveis de ambiente essenciais não estão configuradas ou estão vazias.");
     return res.status(500).json({ error: "Erro de configuração do servidor." });
@@ -86,12 +83,13 @@ app.post("/", async (req, res) => {
 });
 
 // ===================================================================
-// FUNÇÕES AUXILIARES (sem alterações)
+// FUNÇÕES AUXILIARES PARA INTERAGIR COM A API DO POLI DIGITAL
 // ===================================================================
 
 async function ensureContactExists(name, phone, propertyCode) {
   const url = `${BASE_URL}/customers/${CUSTOMER_ID}/contacts`;
-  const payload = { name: name, number: phone, cpf: propertyCode };
+  // LINHA ALTERADA: 'number' foi trocado por 'phone'
+  const payload = { name: name, phone: phone, cpf: propertyCode };
   try {
     const response = await axios.post(url, payload, { headers: API_HEADERS });
     console.log("Novo contato criado.");
