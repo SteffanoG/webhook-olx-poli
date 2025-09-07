@@ -7,6 +7,9 @@ dotenv.config();
 const app = express();
 app.use(express.json());
 
+// ================== ADICIONE ESTA LINHA ABAIXO ==================
+console.log("--- DEBUGGING TEMPLATE IDs ---", { IN_HOURS: process.env.TEMPLATE_ID, OFF_HOURS: process.env.OFF_HOURS_TEMPLATE_ID });
+
 // ================== CONFIG ==================
 const POLI_API_TOKEN = process.env.POLI_API_TOKEN;
 const CUSTOMER_ID = process.env.CUSTOMER_ID;
@@ -21,8 +24,8 @@ const IDEMPOTENCY_TTL_MS = Number(process.env.IDEMPOTENCY_TTL_MS || 10 * 60 * 10
 const SEND_COOLDOWN_MS = Number(process.env.SEND_COOLDOWN_MS || 30 * 60 * 1000);     // 30min
 const MAX_RETRIES = Number(process.env.MAX_RETRIES || 3);
 
-const START_HOUR = Number(process.env.START_HOUR || 9);  // usado como ref, mas lógica detalhada abaixo
-const END_HOUR   = Number(process.env.END_HOUR   || 20); // usado como ref, mas lógica detalhada abaixo
+const START_HOUR = Number(process.env.START_HOUR || 9);
+const END_HOUR   = Number(process.env.END_HOUR   || 20);
 const TIMEZONE   = process.env.TIMEZONE || "America/Sao_Paulo";
 const FORCE_CHANNEL_ID = String(process.env.FORCE_CHANNEL_ID || "false").toLowerCase() === "true";
 
@@ -149,7 +152,7 @@ function toTitleCasePtBr(raw = "") {
 
 function capitalizePart(part) {
   if (!part) return part;
-  if (/^[A-Z]{2,4}$/.test(part)) return part; // preserva siglas curtas tipo SP/USA
+  if (/^[A-Z]{2,4}$/.test(part)) return part;
   if (part.includes("'")) {
     return part
       .split("'")
@@ -178,13 +181,11 @@ function needNameUpdate(current, desired) {
 // ====== Horário comercial / seleção de template ======
 function nowInTimezone(tz) {
   const d = new Date();
-  // Para logging legível:
   const fmt = new Intl.DateTimeFormat("pt-BR", {
     timeZone: tz,
     year: "numeric", month: "2-digit", day: "2-digit",
     hour: "2-digit", minute: "2-digit", second: "2-digit"
   });
-  // Para regras:
   const hourFmt = new Intl.DateTimeFormat("en-US", { timeZone: tz, hour: "2-digit", hour12: false });
   const dowFmt  = new Intl.DateTimeFormat("en-US", { timeZone: tz, weekday: "short" });
 
@@ -197,31 +198,27 @@ function nowInTimezone(tz) {
   return { date: d, hh, dow, fmtStr: fmt.format(d) };
 }
 
-// ATUALIZAÇÃO 1: LÓGICA DE HORÁRIO DE FUNCIONAMENTO
 function selectTemplateForNow() {
   const { hh, dow } = nowInTimezone(TIMEZONE);
   let dentroHorario = false;
 
-  // 'dow' -> 0=Domingo, 1=Segunda, 2=Terça, 3=Quarta, 4=Quinta, 5=Sexta, 6=Sábado
   switch (dow) {
-    case 0: // Domingo
+    case 0:
       dentroHorario = false;
       break;
 
-    case 1: // Segunda
-    case 2: // Terça
-    case 3: // Quarta
-    case 4: // Quinta
-    case 5: // Sexta
-      // Horário de Seg a Sex: 09:00 até 19:59 (dentro da hora 19)
-      if (hh >= 9 && hh < 20) { // O horário é das 09:00 às 20:00
+    case 1:
+    case 2:
+    case 3:
+    case 4:
+    case 5:
+      if (hh >= 9 && hh < 20) {
         dentroHorario = true;
       }
       break;
 
-    case 6: // Sábado
-      // Horário de Sábado: 09:00 até 12:59 (dentro da hora 12)
-      if (hh >= 9 && hh < 13) { // O horário é das 09:00 às 13:00
+    case 6:
+      if (hh >= 9 && hh < 13) {
         dentroHorario = true;
       }
       break;
@@ -249,8 +246,8 @@ function normalizeLeadPayload(body = {}) {
 }
 
 // ================== ANTI-DUP / ANTI-REENVIO (IN-MEM) ==================
-const recentLeads = new Map(); // key: phone:property -> { ts, status }
-const recentSends = new Map(); // key: contactId:templateId -> { ts }
+const recentLeads = new Map();
+const recentSends = new Map();
 
 setInterval(() => {
   const now = Date.now();
@@ -294,18 +291,20 @@ app.post("/", async (req, res) => {
   if (!name || !phoneDigits || !propertyCode) {
     return res.status(400).json({ error: "Dados essenciais do lead ausentes." });
   }
+  
+  // Adicionado um fallback para o e-mail, caso não venha no payload
+  const leadEmail = email || "não informado";
 
-  // Log de horário e template escolhido
-  const { fmtStr, dow, hh } = (() => {
+  const { fmtStr, dow } = (() => {
     const n = nowInTimezone(TIMEZONE);
-    return { fmtStr: n.fmtStr, dow: n.dow, hh: n.hh };
+    return { fmtStr: n.fmtStr, dow: n.dow };
   })();
   const sel = selectTemplateForNow();
   console.log(
     `[${requestId}] Lead:`,
     JSON.stringify({
       name,
-      email,
+      email: leadEmail,
       phone: maskPhone(phoneDigits),
       listing: propertyCode,
       originLeadId
@@ -315,7 +314,6 @@ app.post("/", async (req, res) => {
     `[${requestId}] Agora: ${fmtStr} | DOW=${dow} (0=Dom..6=Sáb) | dentroHorario=${sel.dentroHorario} | template=${sel.chosenTemplate}`
   );
 
-  // -------- Idempotência do LEAD (phone+property) --------
   const idemKey = `${phoneDigits}:${propertyCode}`;
   const now = Date.now();
   const seen = recentLeads.get(idemKey);
@@ -332,53 +330,36 @@ app.post("/", async (req, res) => {
   recentLeads.set(idemKey, { ts: now, status: "inflight" });
 
   try {
-    // 1) Contato (já com nome normalizado; inclui cpf/email quando disponíveis)
-    const contactId = await ensureContactExists(name, phoneDigits, requestId, { email, propertyCode });
+    const contactId = await ensureContactExists(name, phoneDigits, requestId, { email: leadEmail, propertyCode });
     console.log(`[${requestId}] Contato processado. ID: ${contactId}`);
 
-    // 2) Detalhes do contato
     let contactDetails = await getContactDetails(contactId, requestId);
     if (!contactDetails || typeof contactDetails !== "object") {
       throw new Error("Resposta de detalhes do contato vazia ou inválida.");
     }
 
-    // 3) Ajustes de dados (nome/cpf/email) se necessário
     const desiredName = NAME_NORMALIZE_ENABLED ? toTitleCasePtBr(name) : name;
     const needName = NAME_NORMALIZE_ENABLED && needNameUpdate(contactDetails?.name || "", desiredName);
     const needCpf  = (contactDetails?.cpf || "") !== String(propertyCode).padStart(11, "0");
-    const needMail = !!email && (String(contactDetails?.email || "").toLowerCase() !== String(email).toLowerCase());
+    const needMail = !!leadEmail && (String(contactDetails?.email || "").toLowerCase() !== String(leadEmail).toLowerCase());
 
     if (needName || needCpf || needMail) {
       const fields = {};
       if (needName) fields.name = desiredName;
       if (needCpf)  fields.cpf  = String(propertyCode).padStart(11, "0");
-      if (needMail) fields.email = email;
+      if (needMail) fields.email = leadEmail;
 
-      console.log(
-        `[${requestId}] Atualizando contato: ${JSON.stringify({
-          needNameUpdate: !!needName,
-          needCpfUpdate: !!needCpf,
-          needEmailUpdate: !!needMail,
-          fields
-        })}`
-      );
       await updateContactFields(contactId, fields, requestId);
       console.log(
         `[${requestId}] Contato atualizado via PUT. Campos: ${Object.keys(fields).join(", ")}`
       );
       contactDetails = await getContactDetails(contactId, requestId);
-      console.log(
-        `[${requestId}] Após update -> name: "${contactDetails?.name}", cpf: "${contactDetails?.cpf}", email: "${contactDetails?.email || ""}"`
-      );
     } else {
       console.log(`[${requestId}] Sem necessidade de atualizar nome/cpf/email.`);
     }
 
-    // 4) Operador
     let assignedOperatorId = contactDetails.user_id || contactDetails.userId || null;
-    if (assignedOperatorId) {
-      console.log(`[${requestId}] Contato já atribuído ao operador ID: ${assignedOperatorId}.`);
-    } else {
+    if (!assignedOperatorId) {
       console.log(`[${requestId}] Contato sem operador. Sorteando um novo...`);
       assignedOperatorId = Number(
         operatorIds[Math.floor(Math.random() * operatorIds.length)]
@@ -391,47 +372,37 @@ app.post("/", async (req, res) => {
 
     const operatorName =
       operatorNamesMap[assignedOperatorId] || "um de nossos consultores";
-    console.log(`[${requestId}] Nome do operador para o template: ${operatorName}`);
 
-    // 5) Canal correto (ou forçado por env)
     const channelForSend = FORCE_CHANNEL_ID
       ? CHANNEL_ID
       : (contactDetails?.externals?.[0]?.channel_id ?? CHANNEL_ID);
-    console.log(
-      `[${requestId}] Canal para envio:`,
-      JSON.stringify({ chosen: channelForSend, fallback: CHANNEL_ID, forced: FORCE_CHANNEL_ID })
-    );
 
-    // -------- Anti-REENVIO de TEMPLATE (por contato) --------
     const templateToSend = sel.chosenTemplate;
     const sendKey = `${contactId}:${templateToSend}`;
     const prev = recentSends.get(sendKey);
     if (prev && now - prev.ts < SEND_COOLDOWN_MS) {
-      const msLeft = SEND_COOLDOWN_MS - (now - prev.ts);
       console.log(
-        `[${requestId}] 🚫 Anti-reenvio: template ${templateToSend} já enviado para contato ${contactId} há ${Math.round((now - prev.ts)/1000)}s; faltam ~${Math.round(msLeft/1000)}s para liberar.`
+        `[${requestId}] 🚫 Anti-reenvio: template ${templateToSend} já enviado.`
       );
       recentLeads.set(idemKey, { ts: Date.now(), status: "done" });
       return res.status(200).json({ status: "Envio suprimido por cooldown de template." });
     }
 
-    // 6) Envio do template
-    // ATUALIZAÇÃO 2: CHAMADA DA FUNÇÃO DE ENVIO
+    // ALTERAÇÃO 1: Passando 'leadEmail' para a função
     const audit = await sendTemplateMessage(
       contactId,
       assignedOperatorId,
       desiredName,
       operatorName,
-      propertyCode, // <-- Código do imóvel passado AUTOMATICAMENTE
+      leadEmail,
+      propertyCode,
       channelForSend,
       templateToSend,
       requestId
     );
     console.log(`[${requestId}] Template enviado com sucesso.`, JSON.stringify(audit));
 
-    // marca cooldown
     recentSends.set(sendKey, { ts: Date.now() });
-    // fecha idempotência do lead
     recentLeads.set(idemKey, { ts: Date.now(), status: "done" });
 
     console.log(`[${requestId}] ✅ Fluxo completo executado com sucesso!`);
@@ -460,45 +431,15 @@ async function ensureContactExists(name, phoneDigits, reqId, extras = {}) {
     const resp = await postWithRetry(
       url,
       form,
-      {
-        headers: {
-          Authorization: `Bearer ${POLI_API_TOKEN}`,
-          "Content-Type": "application/x-www-form-urlencoded",
-          Accept: "application/json",
-        },
-      },
-      reqId,
-      "create_contact"
+      { headers: { Authorization: `Bearer ${POLI_API_TOKEN}`, "Content-Type": "application/x-www-form-urlencoded", Accept: "application/json" } },
+      reqId, "create_contact"
     );
-
-    const id =
-      resp?.data?.data?.id ??
-      resp?.data?.id ??
-      resp?.data?.contact?.id ??
-      null;
-
-    if (!id) {
-      console.log(`[${reqId}] RAW criação de contato:`, JSON.stringify(resp.data));
-      throw new Error("Criação de contato sem ID na resposta.");
-    }
-    console.log(`[${reqId}] Novo contato criado (nome/CPF/e-mail incluídos quando disponíveis).`);
+    const id = resp?.data?.data?.id ?? resp?.data?.id ?? resp?.data?.contact?.id ?? null;
+    if (!id) throw new Error("Criação de contato sem ID na resposta.");
     return id;
   } catch (error) {
-    const maybeId =
-      error?.response?.data?.data?.id ??
-      error?.response?.data?.id ??
-      null;
-    if (maybeId) {
-      console.log(`[${reqId}] Contato já existente. Usando ID retornado: ${maybeId}`);
-      return maybeId;
-    }
-    console.error(
-      `[${reqId}] Falha ao criar/recuperar contato:`,
-      "status:", error?.response?.status,
-      "data:", JSON.stringify(error?.response?.data || {}),
-      "message:", error?.message,
-      "code:", error?.code
-    );
+    const maybeId = error?.response?.data?.data?.id ?? error?.response?.data?.id ?? null;
+    if (maybeId) return maybeId;
     throw error;
   }
 }
@@ -506,105 +447,45 @@ async function ensureContactExists(name, phoneDigits, reqId, extras = {}) {
 async function getContactDetails(contactId, reqId) {
   const url = `/customers/${CUSTOMER_ID}/contacts/${contactId}`;
   const response = await http.get(url, { headers: API_HEADERS_JSON });
-  const body = response?.data ?? {};
-  const resolved = body?.data ?? body ?? null;
-  console.log(`[${reqId}] Detalhes do contato obtidos.`);
-  return resolved;
+  return response?.data?.data ?? response?.data ?? null;
 }
 
 async function updateContactFields(contactId, fields = {}, reqId) {
   if (!fields || !Object.keys(fields).length) return;
-
   const url = `/customers/${CUSTOMER_ID}/contacts/${contactId}`;
-
-  // 1) Tenta JSON
   try {
-    const resp = await putWithRetry(
-      url,
-      fields,
-      { headers: API_HEADERS_JSON },
-      reqId,
-      "update_contact_json"
-    );
-    console.log(
-      `[${reqId}] Contato atualizado via PUT (JSON). Campos: ${Object.keys(fields).join(", ")}`
-    );
-    return resp?.data;
+    await putWithRetry(url, fields, { headers: API_HEADERS_JSON }, reqId, "update_contact_json");
   } catch (err) {
-    const st = err?.response?.status;
-    // 2) Fallback para x-www-form-urlencoded se o servidor rejeitar JSON
-    if ([400, 401, 403, 404, 409, 415, 422].includes(Number(st))) {
-      const form = new URLSearchParams();
-      for (const [k, v] of Object.entries(fields)) {
-        if (v !== undefined && v !== null) form.append(k, String(v));
-      }
-      try {
-        const resp = await putWithRetry(
-          url,
-          form,
-          {
-            headers: {
-              Authorization: `Bearer ${POLI_API_TOKEN}`,
-              "Content-Type": "application/x-www-form-urlencoded",
-              Accept: "application/json",
-            },
-          },
-          reqId,
-          "update_contact_form"
-        );
-        console.log(
-          `[${reqId}] Contato atualizado via PUT (FORM). Campos: ${Object.keys(fields).join(", ")}`
-        );
-        return resp?.data;
-      } catch (err2) {
-        console.error(
-          `[${reqId}] Falha ao atualizar contato (FORM)`,
-          "status:", err2?.response?.status,
-          "data:", JSON.stringify(err2?.response?.data || {})
-        );
-        throw err2;
-      }
-    } else {
-      console.error(
-        `[${reqId}] Falha ao atualizar contato (JSON)`,
-        "status:", err?.response?.status,
-        "data:", JSON.stringify(err?.response?.data || {})
-      );
-      throw err;
+    const form = new URLSearchParams();
+    for (const [k, v] of Object.entries(fields)) {
+      if (v !== undefined && v !== null) form.append(k, String(v));
     }
+    await putWithRetry(url, form, { headers: { Authorization: `Bearer ${POLI_API_TOKEN}`, "Content-Type": "application/x-www-form-urlencoded", Accept: "application/json" } }, reqId, "update_contact_form");
   }
 }
 
 async function assignContactToOperator(contactId, operatorId, reqId) {
   const url = `/customers/${CUSTOMER_ID}/contacts/redirect/contacts/${contactId}`;
   const payload = { user_id: operatorId };
-  try {
-    await postWithRetry(url, payload, { headers: API_HEADERS_JSON }, reqId, "redirect");
-    return true;
-  } catch (error) {
-    console.error(
-      `[${reqId}] Falha ao atribuir operador:`,
-      "status:", error?.response?.status,
-      "data:", JSON.stringify(error?.response?.data || {}),
-      "message:", error?.message
-    );
-    throw error;
-  }
+  await postWithRetry(url, payload, { headers: API_HEADERS_JSON }, reqId, "redirect");
 }
 
-// ATUALIZAÇÃO 2: DEFINIÇÃO DA FUNÇÃO DE ENVIO
+// ALTERAÇÃO 2: Função agora aceita 'email' e o adiciona ao array de parâmetros
 async function sendTemplateMessage(
   contactId,
   userId,
   contactName,
   operatorName,
+  email,
   propertyCode,
   channelId,
   templateIdToUse,
   reqId
 ) {
   const url = `/customers/${CUSTOMER_ID}/whatsapp/send_template/channels/${channelId}/contacts/${contactId}/users/${userId}`;
-  const params = JSON.stringify([contactName, operatorName, propertyCode]);
+  
+  // Array agora contém 4 itens na ordem correta
+  const params = JSON.stringify([contactName, operatorName, email, propertyCode]);
 
   const form = new URLSearchParams();
   form.append("quick_message_id", templateIdToUse);
@@ -613,31 +494,15 @@ async function sendTemplateMessage(
   const resp = await postWithRetry(
     url,
     form,
-    {
-      headers: {
-        Authorization: `Bearer ${POLI_API_TOKEN}`,
-        "Content-Type": "application/x-www-form-urlencoded",
-        Accept: "application/json",
-      },
-    },
-    reqId,
-    "send_template"
+    { headers: { Authorization: `Bearer ${POLI_API_TOKEN}`, "Content-Type": "application/x-www-form-urlencoded", Accept: "application/json" } },
+    reqId, "send_template"
   );
 
   const body = resp?.data || {};
-  console.log(`[${reqId}] Resposta do send_template:`, JSON.stringify(body));
-
   if (body?.success === false || body?.send === false) {
-    throw new Error(`Template aceito mas não enviado (success/send=false): ${JSON.stringify(body)}`);
+    throw new Error(`Template aceito mas não enviado: ${JSON.stringify(body)}`);
   }
-
-  return {
-    chat_id: body?.chat_id,
-    message_uid: body?.message_uid,
-    success: body?.success,
-    send: body?.send,
-    http_code: body?.http_code,
-  };
+  return body;
 }
 
 // ================== STARTUP & SAFETY ==================
