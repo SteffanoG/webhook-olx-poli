@@ -7,9 +7,6 @@ dotenv.config();
 const app = express();
 app.use(express.json());
 
-// ================== ADICIONE ESTA LINHA ABAIXO ==================
-console.log("--- DEBUGGING TEMPLATE IDs ---", { IN_HOURS: process.env.TEMPLATE_ID, OFF_HOURS: process.env.OFF_HOURS_TEMPLATE_ID });
-
 // ================== CONFIG ==================
 const POLI_API_TOKEN = process.env.POLI_API_TOKEN;
 const CUSTOMER_ID = process.env.CUSTOMER_ID;
@@ -274,16 +271,7 @@ app.post("/", async (req, res) => {
     !TEMPLATE_ID ||
     !Object.keys(operatorNamesMap).length
   ) {
-    console.error(
-      `[${requestId}] ❌ ERRO CRÍTICO: Variáveis de ambiente ausentes: ` +
-        JSON.stringify({
-          hasOperatorIds: !!operatorIds.length,
-          hasCUSTOMER_ID: !!CUSTOMER_ID,
-          hasCHANNEL_ID: !!CHANNEL_ID,
-          hasTEMPLATE_ID: !!TEMPLATE_ID,
-          hasOperatorNamesMap: !!Object.keys(operatorNamesMap).length,
-        })
-    );
+    console.error(`[${requestId}] ❌ ERRO CRÍTICO: Variáveis de ambiente ausentes.`);
     return res.status(500).json({ error: "Erro de configuração do servidor." });
   }
 
@@ -292,7 +280,6 @@ app.post("/", async (req, res) => {
     return res.status(400).json({ error: "Dados essenciais do lead ausentes." });
   }
   
-  // Adicionado um fallback para o e-mail, caso não venha no payload
   const leadEmail = email || "não informado";
 
   const { fmtStr, dow } = (() => {
@@ -300,43 +287,25 @@ app.post("/", async (req, res) => {
     return { fmtStr: n.fmtStr, dow: n.dow };
   })();
   const sel = selectTemplateForNow();
-  console.log(
-    `[${requestId}] Lead:`,
-    JSON.stringify({
-      name,
-      email: leadEmail,
-      phone: maskPhone(phoneDigits),
-      listing: propertyCode,
-      originLeadId
-    })
-  );
-  console.log(
-    `[${requestId}] Agora: ${fmtStr} | DOW=${dow} (0=Dom..6=Sáb) | dentroHorario=${sel.dentroHorario} | template=${sel.chosenTemplate}`
-  );
+  console.log(`[${requestId}] Lead:`, JSON.stringify({ name, email: leadEmail, phone: maskPhone(phoneDigits), listing: propertyCode, originLeadId }));
+  console.log(`[${requestId}] Agora: ${fmtStr} | DOW=${dow} (0=Dom..6=Sáb) | dentroHorario=${sel.dentroHorario} | template=${sel.chosenTemplate}`);
 
   const idemKey = `${phoneDigits}:${propertyCode}`;
   const now = Date.now();
   const seen = recentLeads.get(idemKey);
   if (seen) {
-    if (seen.status === "done" && now - seen.ts < IDEMPOTENCY_TTL_MS) {
-      console.log(`[${requestId}] 🔁 Duplicado recente (lead) — ignorado.`);
-      return res.status(200).json({ status: "Lead ignorado (duplicado recente)." });
-    }
-    if (seen.status === "inflight") {
-      console.log(`[${requestId}] ⏳ Lead já em processamento — 202.`);
-      return res.status(202).json({ status: "Lead em processamento." });
-    }
+      if (seen.status === "done" && now - seen.ts < IDEMPOTENCY_TTL_MS) {
+          return res.status(200).json({ status: "Lead ignorado (duplicado recente)." });
+      }
+      if (seen.status === "inflight") {
+          return res.status(202).json({ status: "Lead em processamento." });
+      }
   }
   recentLeads.set(idemKey, { ts: now, status: "inflight" });
 
   try {
     const contactId = await ensureContactExists(name, phoneDigits, requestId, { email: leadEmail, propertyCode });
-    console.log(`[${requestId}] Contato processado. ID: ${contactId}`);
-
     let contactDetails = await getContactDetails(contactId, requestId);
-    if (!contactDetails || typeof contactDetails !== "object") {
-      throw new Error("Resposta de detalhes do contato vazia ou inválida.");
-    }
 
     const desiredName = NAME_NORMALIZE_ENABLED ? toTitleCasePtBr(name) : name;
     const needName = NAME_NORMALIZE_ENABLED && needNameUpdate(contactDetails?.name || "", desiredName);
@@ -348,54 +317,31 @@ app.post("/", async (req, res) => {
       if (needName) fields.name = desiredName;
       if (needCpf)  fields.cpf  = String(propertyCode).padStart(11, "0");
       if (needMail) fields.email = leadEmail;
-
       await updateContactFields(contactId, fields, requestId);
-      console.log(
-        `[${requestId}] Contato atualizado via PUT. Campos: ${Object.keys(fields).join(", ")}`
-      );
-      contactDetails = await getContactDetails(contactId, requestId);
-    } else {
-      console.log(`[${requestId}] Sem necessidade de atualizar nome/cpf/email.`);
     }
 
     let assignedOperatorId = contactDetails.user_id || contactDetails.userId || null;
     if (!assignedOperatorId) {
-      console.log(`[${requestId}] Contato sem operador. Sorteando um novo...`);
-      assignedOperatorId = Number(
-        operatorIds[Math.floor(Math.random() * operatorIds.length)]
-      );
+      assignedOperatorId = Number(operatorIds[Math.floor(Math.random() * operatorIds.length)]);
       await assignContactToOperator(contactId, assignedOperatorId, requestId);
-      console.log(
-        `[${requestId}] Contato ${contactId} atribuído ao novo operador ${assignedOperatorId}.`
-      );
     }
 
-    const operatorName =
-      operatorNamesMap[assignedOperatorId] || "um de nossos consultores";
-
-    const channelForSend = FORCE_CHANNEL_ID
-      ? CHANNEL_ID
-      : (contactDetails?.externals?.[0]?.channel_id ?? CHANNEL_ID);
-
+    const operatorName = operatorNamesMap[assignedOperatorId] || "um de nossos consultores";
+    const channelForSend = FORCE_CHANNEL_ID ? CHANNEL_ID : (contactDetails?.externals?.[0]?.channel_id ?? CHANNEL_ID);
     const templateToSend = sel.chosenTemplate;
+
     const sendKey = `${contactId}:${templateToSend}`;
-    const prev = recentSends.get(sendKey);
-    if (prev && now - prev.ts < SEND_COOLDOWN_MS) {
-      console.log(
-        `[${requestId}] 🚫 Anti-reenvio: template ${templateToSend} já enviado.`
-      );
+    if (recentSends.has(sendKey) && now - recentSends.get(sendKey).ts < SEND_COOLDOWN_MS) {
       recentLeads.set(idemKey, { ts: Date.now(), status: "done" });
       return res.status(200).json({ status: "Envio suprimido por cooldown de template." });
     }
-
-    // ALTERAÇÃO 1: Passando 'leadEmail' para a função
+    
+    // CHAMADA DA FUNÇÃO REVERTIDA PARA A VERSÃO ORIGINAL
     const audit = await sendTemplateMessage(
       contactId,
       assignedOperatorId,
       desiredName,
       operatorName,
-      leadEmail,
-      propertyCode,
       channelForSend,
       templateToSend,
       requestId
@@ -405,14 +351,10 @@ app.post("/", async (req, res) => {
     recentSends.set(sendKey, { ts: Date.now() });
     recentLeads.set(idemKey, { ts: Date.now(), status: "done" });
 
-    console.log(`[${requestId}] ✅ Fluxo completo executado com sucesso!`);
     return res.status(200).json({ status: "Lead recebido e processado com sucesso." });
   } catch (error) {
     recentLeads.delete(idemKey);
-    const errorMsg =
-      error?.response?.data
-        ? JSON.stringify(error.response.data)
-        : error?.message || String(error);
+    const errorMsg = error?.response?.data ? JSON.stringify(error.response.data) : error?.message || String(error);
     console.error(`[${requestId}] ❌ Erro no fluxo:`, errorMsg);
     return res.status(500).json({ status: "Erro interno ao processar o lead." });
   }
@@ -429,8 +371,7 @@ async function ensureContactExists(name, phoneDigits, reqId, extras = {}) {
 
   try {
     const resp = await postWithRetry(
-      url,
-      form,
+      url, form,
       { headers: { Authorization: `Bearer ${POLI_API_TOKEN}`, "Content-Type": "application/x-www-form-urlencoded", Accept: "application/json" } },
       reqId, "create_contact"
     );
@@ -470,22 +411,20 @@ async function assignContactToOperator(contactId, operatorId, reqId) {
   await postWithRetry(url, payload, { headers: API_HEADERS_JSON }, reqId, "redirect");
 }
 
-// ALTERAÇÃO 2: Função agora aceita 'email' e o adiciona ao array de parâmetros
+// FUNÇÃO 'sendTemplateMessage' REVERTIDA PARA A VERSÃO ORIGINAL
 async function sendTemplateMessage(
   contactId,
   userId,
   contactName,
   operatorName,
-  email,
-  propertyCode,
   channelId,
   templateIdToUse,
   reqId
 ) {
   const url = `/customers/${CUSTOMER_ID}/whatsapp/send_template/channels/${channelId}/contacts/${contactId}/users/${userId}`;
   
-  // Array agora contém 4 itens na ordem correta
-  const params = JSON.stringify([contactName, operatorName, email, propertyCode]);
+  // Enviando apenas os dois parâmetros originais
+  const params = JSON.stringify([contactName, operatorName]);
 
   const form = new URLSearchParams();
   form.append("quick_message_id", templateIdToUse);
