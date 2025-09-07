@@ -21,8 +21,8 @@ const IDEMPOTENCY_TTL_MS = Number(process.env.IDEMPOTENCY_TTL_MS || 10 * 60 * 10
 const SEND_COOLDOWN_MS = Number(process.env.SEND_COOLDOWN_MS || 30 * 60 * 1000);     // 30min
 const MAX_RETRIES = Number(process.env.MAX_RETRIES || 3);
 
-const START_HOUR = Number(process.env.START_HOUR || 9);  // início da janela (inclusivo)
-const END_HOUR   = Number(process.env.END_HOUR   || 21); // fim da janela (inclusivo)
+const START_HOUR = Number(process.env.START_HOUR || 9);  // usado como ref, mas lógica detalhada abaixo
+const END_HOUR   = Number(process.env.END_HOUR   || 20); // usado como ref, mas lógica detalhada abaixo
 const TIMEZONE   = process.env.TIMEZONE || "America/Sao_Paulo";
 const FORCE_CHANNEL_ID = String(process.env.FORCE_CHANNEL_ID || "false").toLowerCase() === "true";
 
@@ -197,9 +197,36 @@ function nowInTimezone(tz) {
   return { date: d, hh, dow, fmtStr: fmt.format(d) };
 }
 
+// ATUALIZAÇÃO 1: LÓGICA DE HORÁRIO DE FUNCIONAMENTO
 function selectTemplateForNow() {
-  const { hh } = nowInTimezone(TIMEZONE);
-  const dentroHorario = hh >= START_HOUR && hh <= END_HOUR;
+  const { hh, dow } = nowInTimezone(TIMEZONE);
+  let dentroHorario = false;
+
+  // 'dow' -> 0=Domingo, 1=Segunda, 2=Terça, 3=Quarta, 4=Quinta, 5=Sexta, 6=Sábado
+  switch (dow) {
+    case 0: // Domingo
+      dentroHorario = false;
+      break;
+
+    case 1: // Segunda
+    case 2: // Terça
+    case 3: // Quarta
+    case 4: // Quinta
+    case 5: // Sexta
+      // Horário de Seg a Sex: 09:00 até 19:59 (dentro da hora 19)
+      if (hh >= 9 && hh < 20) { // O horário é das 09:00 às 20:00
+        dentroHorario = true;
+      }
+      break;
+
+    case 6: // Sábado
+      // Horário de Sábado: 09:00 até 12:59 (dentro da hora 12)
+      if (hh >= 9 && hh < 13) { // O horário é das 09:00 às 13:00
+        dentroHorario = true;
+      }
+      break;
+  }
+
   const chosenTemplate = dentroHorario ? TEMPLATE_ID : (OFF_HOURS_TEMPLATE_ID || TEMPLATE_ID);
   return { dentroHorario, chosenTemplate };
 }
@@ -285,7 +312,7 @@ app.post("/", async (req, res) => {
     })
   );
   console.log(
-    `[${requestId}] Agora: ${fmtStr} | DOW=${dow} (0=Dom..6=Sáb) | janela=${String(START_HOUR).padStart(2,"0")}:00-${String(END_HOUR).padStart(2,"0")}:00 ${TIMEZONE} | dentroHorario=${sel.dentroHorario} | template=${sel.chosenTemplate}`
+    `[${requestId}] Agora: ${fmtStr} | DOW=${dow} (0=Dom..6=Sáb) | dentroHorario=${sel.dentroHorario} | template=${sel.chosenTemplate}`
   );
 
   // -------- Idempotência do LEAD (phone+property) --------
@@ -389,11 +416,13 @@ app.post("/", async (req, res) => {
     }
 
     // 6) Envio do template
+    // ATUALIZAÇÃO 2: CHAMADA DA FUNÇÃO DE ENVIO
     const audit = await sendTemplateMessage(
       contactId,
       assignedOperatorId,
       desiredName,
       operatorName,
+      propertyCode, // <-- Código do imóvel passado AUTOMATICAMENTE
       channelForSend,
       templateToSend,
       requestId
@@ -563,17 +592,19 @@ async function assignContactToOperator(contactId, operatorId, reqId) {
   }
 }
 
+// ATUALIZAÇÃO 2: DEFINIÇÃO DA FUNÇÃO DE ENVIO
 async function sendTemplateMessage(
   contactId,
   userId,
   contactName,
   operatorName,
+  propertyCode,
   channelId,
   templateIdToUse,
   reqId
 ) {
   const url = `/customers/${CUSTOMER_ID}/whatsapp/send_template/channels/${channelId}/contacts/${contactId}/users/${userId}`;
-  const params = JSON.stringify([contactName, operatorName]);
+  const params = JSON.stringify([contactName, operatorName, propertyCode]);
 
   const form = new URLSearchParams();
   form.append("quick_message_id", templateIdToUse);
