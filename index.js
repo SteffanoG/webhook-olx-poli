@@ -51,7 +51,6 @@ try {
   console.error("ERRO CRÍTICO: Formato inválido em OPERATOR_NAMES_MAP. Deve ser JSON.", e);
 }
 
-
 // ========= LÓGICA DE DISTRIBUIÇÃO POR HORÁRIO =========
 const timedOperators = {
     '09_17': ['102715', '103194'], // Cleber e Adaene (09:00 às 16:59)
@@ -60,24 +59,61 @@ const timedOperators = {
 const allTimedIds = [].concat(...Object.values(timedOperators));
 const fullTimeOperatorIds = operatorIds.filter(id => !allTimedIds.includes(id));
 
-function getAvailableOperators() {
-    const { hh } = nowInTimezone(TIMEZONE);
-    let available = [...fullTimeOperatorIds];
-    if (hh >= 9 && hh < 17) {
-        available.push(...timedOperators['09_17']);
+// ========= INÍCIO DA NOVA LÓGICA DE STATUS REAL (API) =========
+
+/**
+ * Busca na API da PoliChat todos os operadores e retorna um Set com os IDs daqueles que estão "online".
+ * @returns {Promise<Set<string>>} Um Set com os IDs dos operadores online.
+ */
+async function getOnlineOperatorIds() {
+    const url = `/customers/${CUSTOMER_ID}/users`;
+    try {
+        const response = await http.get(url, { headers: API_HEADERS_JSON });
+        const onlineIds = new Set();
+        if (response.data && Array.isArray(response.data.data)) {
+            for (const user of response.data.data) {
+                // Adiciona na lista apenas se o status for 'online'
+                if (user.status === 'online') {
+                    onlineIds.add(String(user.id));
+                }
+            }
+        }
+        return onlineIds;
+    } catch (error) {
+        console.error("Falha ao buscar status dos operadores na API da PoliChat:", error.message);
+        // Em caso de falha na API, retorna um Set vazio para não travar a operação.
+        return new Set();
     }
-    if (hh >= 12 && hh < 18) {
-        available.push(...timedOperators['12_18']);
-    }
-    // Retorna a lista ordenada para garantir consistência no ciclo
-    return [...new Set(available)].sort();
 }
 
-// ========= INÍCIO DA NOVA LÓGICA DE DISTRIBUIÇÃO IGUALITÁRIA =========
-// 1. "Memória" para lembrar a posição do último operador que recebeu um lead.
-// Esta variável guarda o estado entre as requisições.
+/**
+ * Retorna uma lista de operadores que estão DENTRO DO HORÁRIO e com STATUS ONLINE.
+ * @returns {Promise<string[]>} Lista de IDs de operadores verdadeiramente disponíveis.
+ */
+async function getAvailableOperators() {
+    // Passo 1: Pega a lista de quem está com status 'online' na plataforma
+    const onlineIds = await getOnlineOperatorIds();
+
+    // Passo 2: Pega a lista de quem deveria estar trabalhando pelo horário
+    const { hh } = nowInTimezone(TIMEZONE);
+    let scheduledOperators = [...fullTimeOperatorIds];
+    if (hh >= 9 && hh < 17) {
+        scheduledOperators.push(...timedOperators['09_17']);
+    }
+    if (hh >= 12 && hh < 18) {
+        scheduledOperators.push(...timedOperators['12_18']);
+    }
+    scheduledOperators = [...new Set(scheduledOperators)];
+
+    // Passo 3: Retorna apenas os operadores que estão em AMBAS as listas
+    const trulyAvailable = scheduledOperators.filter(id => onlineIds.has(id));
+    
+    // Retorna a lista ordenada para garantir consistência no ciclo do round-robin
+    return trulyAvailable.sort();
+}
+
 let roundRobinIndex = 0;
-// ========= FIM DA NOVA LÓGICA DE DISTRIBUIÇÃO IGUALITÁRIA =========
+// ========= FIM DA NOVA LÓGICA =========
 
 
 // ================== UTILS ==================
@@ -351,21 +387,17 @@ app.post("/", async (req, res) => {
 
     let assignedOperatorId = contactDetails.user_id || contactDetails.userId || null;
     if (!assignedOperatorId) {
-      // 2. LÓGICA DE ATRIBUIÇÃO IGUALITÁRIA (ROUND-ROBIN)
-      const availableOperators = getAvailableOperators();
-      console.log(`[${requestId}] Operadores disponíveis (ordenados): ${availableOperators.join(', ')}`);
+      // ATUALIZAÇÃO: a função agora é assíncrona, então usamos 'await'
+      const availableOperators = await getAvailableOperators();
+      console.log(`[${requestId}] Operadores verdadeiramente disponíveis (horário E status online): ${availableOperators.join(', ')}`);
 
-      // Se houver operadores disponíveis, escolhe o próximo do ciclo
+      // Se a lista de disponíveis estiver vazia, usa a lista completa de TODOS os operadores como fallback
       const operatorsToChooseFrom = availableOperators.length > 0 ? availableOperators : operatorIds.sort();
 
       if (operatorsToChooseFrom.length > 0) {
-        // Pega o operador da posição atual do ciclo
         const operatorIndex = roundRobinIndex % operatorsToChooseFrom.length;
         assignedOperatorId = Number(operatorsToChooseFrom[operatorIndex]);
-        
-        // Avança o índice para o próximo da fila na próxima vez
         roundRobinIndex++;
-
         await assignContactToOperator(contactId, assignedOperatorId, requestId);
         console.log(`[${requestId}] Novo lead atribuído ao operador ${assignedOperatorId} (posição ${operatorIndex} do ciclo)`);
       } else {
@@ -394,7 +426,7 @@ app.post("/", async (req, res) => {
     );
     console.log(`[${requestId}] Template enviado com sucesso.`, JSON.stringify(audit));
 
-    recentSends.set(sendKey, { ts: Date.now() });
+    recentSends.set(sendKey, { ts: Date.now(), status: "done" });
     recentLeads.set(idemKey, { ts: Date.now(), status: "done" });
 
     return res.status(200).json({ status: "Lead recebido e processado com sucesso." });
