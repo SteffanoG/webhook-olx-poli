@@ -51,6 +51,35 @@ try {
   console.error("ERRO CRÍTICO: Formato inválido em OPERATOR_NAMES_MAP. Deve ser JSON.", e);
 }
 
+
+// ========= LÓGICA DE DISTRIBUIÇÃO POR HORÁRIO =========
+const timedOperators = {
+    '09_17': ['102715', '103194'], // Cleber e Adaene (09:00 às 16:59)
+    '12_18': ['102235']             // Charles (12:00 às 17:59)
+};
+const allTimedIds = [].concat(...Object.values(timedOperators));
+const fullTimeOperatorIds = operatorIds.filter(id => !allTimedIds.includes(id));
+
+function getAvailableOperators() {
+    const { hh } = nowInTimezone(TIMEZONE);
+    let available = [...fullTimeOperatorIds];
+    if (hh >= 9 && hh < 17) {
+        available.push(...timedOperators['09_17']);
+    }
+    if (hh >= 12 && hh < 18) {
+        available.push(...timedOperators['12_18']);
+    }
+    // Retorna a lista ordenada para garantir consistência no ciclo
+    return [...new Set(available)].sort();
+}
+
+// ========= INÍCIO DA NOVA LÓGICA DE DISTRIBUIÇÃO IGUALITÁRIA =========
+// 1. "Memória" para lembrar a posição do último operador que recebeu um lead.
+// Esta variável guarda o estado entre as requisições.
+let roundRobinIndex = 0;
+// ========= FIM DA NOVA LÓGICA DE DISTRIBUIÇÃO IGUALITÁRIA =========
+
+
 // ================== UTILS ==================
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -322,8 +351,26 @@ app.post("/", async (req, res) => {
 
     let assignedOperatorId = contactDetails.user_id || contactDetails.userId || null;
     if (!assignedOperatorId) {
-      assignedOperatorId = Number(operatorIds[Math.floor(Math.random() * operatorIds.length)]);
-      await assignContactToOperator(contactId, assignedOperatorId, requestId);
+      // 2. LÓGICA DE ATRIBUIÇÃO IGUALITÁRIA (ROUND-ROBIN)
+      const availableOperators = getAvailableOperators();
+      console.log(`[${requestId}] Operadores disponíveis (ordenados): ${availableOperators.join(', ')}`);
+
+      // Se houver operadores disponíveis, escolhe o próximo do ciclo
+      const operatorsToChooseFrom = availableOperators.length > 0 ? availableOperators : operatorIds.sort();
+
+      if (operatorsToChooseFrom.length > 0) {
+        // Pega o operador da posição atual do ciclo
+        const operatorIndex = roundRobinIndex % operatorsToChooseFrom.length;
+        assignedOperatorId = Number(operatorsToChooseFrom[operatorIndex]);
+        
+        // Avança o índice para o próximo da fila na próxima vez
+        roundRobinIndex++;
+
+        await assignContactToOperator(contactId, assignedOperatorId, requestId);
+        console.log(`[${requestId}] Novo lead atribuído ao operador ${assignedOperatorId} (posição ${operatorIndex} do ciclo)`);
+      } else {
+        console.warn(`[${requestId}] Nenhum operador disponível para atribuição. O lead ${contactId} não foi atribuído.`);
+      }
     }
 
     const operatorName = operatorNamesMap[assignedOperatorId] || "um de nossos consultores";
@@ -336,7 +383,6 @@ app.post("/", async (req, res) => {
       return res.status(200).json({ status: "Envio suprimido por cooldown de template." });
     }
     
-    // CHAMADA DA FUNÇÃO REVERTIDA PARA A VERSÃO ORIGINAL
     const audit = await sendTemplateMessage(
       contactId,
       assignedOperatorId,
@@ -411,7 +457,6 @@ async function assignContactToOperator(contactId, operatorId, reqId) {
   await postWithRetry(url, payload, { headers: API_HEADERS_JSON }, reqId, "redirect");
 }
 
-// FUNÇÃO 'sendTemplateMessage' REVERTIDA PARA A VERSÃO ORIGINAL
 async function sendTemplateMessage(
   contactId,
   userId,
@@ -423,7 +468,6 @@ async function sendTemplateMessage(
 ) {
   const url = `/customers/${CUSTOMER_ID}/whatsapp/send_template/channels/${channelId}/contacts/${contactId}/users/${userId}`;
   
-  // Enviando apenas os dois parâmetros originais
   const params = JSON.stringify([contactName, operatorName]);
 
   const form = new URLSearchParams();
