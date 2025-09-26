@@ -59,10 +59,11 @@ const timedOperators = {
 const allTimedIds = [].concat(...Object.values(timedOperators));
 const fullTimeOperatorIds = operatorIds.filter(id => !allTimedIds.includes(id));
 
-// ========= INÍCIO DA NOVA LÓGICA DE STATUS REAL (API) =========
+// ========= LÓGICA DE STATUS REAL (API) COM DIAGNÓSTICO =========
 
 /**
  * Busca na API da PoliChat todos os operadores e retorna um Set com os IDs daqueles que estão "online".
+ * INCLUI UM LOG DE DIAGNÓSTICO TEMPORÁRIO.
  * @returns {Promise<Set<string>>} Um Set com os IDs dos operadores online.
  */
 async function getOnlineOperatorIds() {
@@ -70,9 +71,20 @@ async function getOnlineOperatorIds() {
     try {
         const response = await http.get(url, { headers: API_HEADERS_JSON });
         const onlineIds = new Set();
+
+        // ========= INÍCIO DO LOG DE DIAGNÓSTICO =========
         if (response.data && Array.isArray(response.data.data)) {
+            console.log("[DIAGNÓSTICO] Status de todos os operadores recebido da API:");
+            // Loga o ID, Nome e Status de cada operador para análise
+            const allStatuses = response.data.data.map(user => ({
+                id: user.id,
+                name: user.name,
+                status: user.status
+            }));
+            console.log(JSON.stringify(allStatuses, null, 2));
+        // ========= FIM DO LOG DE DIAGNÓSTICO =========
+
             for (const user of response.data.data) {
-                // Adiciona na lista apenas se o status for 'online'
                 if (user.status === 'online') {
                     onlineIds.add(String(user.id));
                 }
@@ -81,10 +93,10 @@ async function getOnlineOperatorIds() {
         return onlineIds;
     } catch (error) {
         console.error("Falha ao buscar status dos operadores na API da PoliChat:", error.message);
-        // Em caso de falha na API, retorna um Set vazio para não travar a operação.
         return new Set();
     }
 }
+
 
 /**
  * Retorna uma lista de operadores que estão DENTRO DO HORÁRIO e com STATUS ONLINE.
@@ -113,7 +125,6 @@ async function getAvailableOperators() {
 }
 
 let roundRobinIndex = 0;
-// ========= FIM DA NOVA LÓGICA =========
 
 
 // ================== UTILS ==================
@@ -387,11 +398,9 @@ app.post("/", async (req, res) => {
 
     let assignedOperatorId = contactDetails.user_id || contactDetails.userId || null;
     if (!assignedOperatorId) {
-      // ATUALIZAÇÃO: a função agora é assíncrona, então usamos 'await'
       const availableOperators = await getAvailableOperators();
       console.log(`[${requestId}] Operadores verdadeiramente disponíveis (horário E status online): ${availableOperators.join(', ')}`);
 
-      // Se a lista de disponíveis estiver vazia, usa a lista completa de TODOS os operadores como fallback
       const operatorsToChooseFrom = availableOperators.length > 0 ? availableOperators : operatorIds.sort();
 
       if (operatorsToChooseFrom.length > 0) {
