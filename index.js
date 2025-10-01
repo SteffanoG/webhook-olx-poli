@@ -53,37 +53,31 @@ try {
 
 // ========= LÓGICA DE DISTRIBUIÇÃO POR HORÁRIO =========
 const timedOperators = {
-    '09_17': ['102715', '103194', '102234'], // Cleber, Henrique e Adaene (09:00 às 16:59)
-    '12_18': ['102235']             // Charles (12:00 às 17:59)
+    '09_17': ['102715', '103194', '102234'], // Cleber, Adaene e Henrique (09:00 às 16:59)
+    '12_18': ['102235']                      // Charles (12:00 às 17:59)
 };
 const allTimedIds = [].concat(...Object.values(timedOperators));
 const fullTimeOperatorIds = operatorIds.filter(id => !allTimedIds.includes(id));
 
-// ========= LÓGICA DE STATUS REAL (API) COM DIAGNÓSTICO =========
+// ========= LÓGICA DE STATUS REAL (API) COM DEPURAÇÃO =========
 
 /**
+ * VERSÃO DE DEPURAÇÃO (CORRIGIDA)
  * Busca na API da PoliChat todos os operadores e retorna um Set com os IDs daqueles que estão "online".
- * INCLUI UM LOG DE DIAGNÓSTICO TEMPORÁRIO.
  * @returns {Promise<Set<string>>} Um Set com os IDs dos operadores online.
  */
 async function getOnlineOperatorIds() {
     const url = `/customers/${CUSTOMER_ID}/users`;
     try {
         const response = await http.get(url, { headers: API_HEADERS_JSON });
+
+        // ========= INÍCIO DO LOG DE DEPURAÇÃO =========
+        console.log("[DEPURAÇÃO] Resposta completa recebida da API /users:");
+        console.log(JSON.stringify(response.data, null, 2));
+        // ========= FIM DO LOG DE DEPURAÇÃO =========
+
         const onlineIds = new Set();
-
-        // ========= INÍCIO DO LOG DE DIAGNÓSTICO =========
         if (response.data && Array.isArray(response.data.data)) {
-            console.log("[DIAGNÓSTICO] Status de todos os operadores recebido da API:");
-            // Loga o ID, Nome e Status de cada operador para análise
-            const allStatuses = response.data.data.map(user => ({
-                id: user.id,
-                name: user.name,
-                status: user.status
-            }));
-            console.log(JSON.stringify(allStatuses, null, 2));
-        // ========= FIM DO LOG DE DIAGNÓSTICO =========
-
             for (const user of response.data.data) {
                 if (user.status === 'online') {
                     onlineIds.add(String(user.id));
@@ -435,7 +429,7 @@ app.post("/", async (req, res) => {
     );
     console.log(`[${requestId}] Template enviado com sucesso.`, JSON.stringify(audit));
 
-    recentSends.set(sendKey, { ts: Date.now(), status: "done" });
+    recentSends.set(sendKey, { ts: Date.now() });
     recentLeads.set(idemKey, { ts: Date.now(), status: "done" });
 
     return res.status(200).json({ status: "Lead recebido e processado com sucesso." });
