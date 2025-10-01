@@ -53,7 +53,7 @@ try {
 
 // ========= LÓGICA DE DISTRIBUIÇÃO POR HORÁRIO =========
 const timedOperators = {
-    '09_17': ['102715', '103194'], // Cleber e Adaene (09:00 às 16:59)
+    '09_17': ['102715', '103194', '102234'], // Cleber, Henrique e Adaene (09:00 às 16:59)
     '12_18': ['102235']             // Charles (12:00 às 17:59)
 };
 const allTimedIds = [].concat(...Object.values(timedOperators));
