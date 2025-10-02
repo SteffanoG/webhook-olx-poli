@@ -60,21 +60,13 @@ const allTimedIds = [].concat(...Object.values(timedOperators));
 const fullTimeOperatorIds = operatorIds.filter(id => !allTimedIds.includes(id));
 
 // ========= LÓGICA DE STATUS REAL (API) COM DEPURAÇÃO =========
-
-/**
- * VERSÃO DE DEPURAÇÃO (CORRIGIDA)
- * Busca na API da PoliChat todos os operadores e retorna um Set com os IDs daqueles que estão "online".
- * @returns {Promise<Set<string>>} Um Set com os IDs dos operadores online.
- */
 async function getOnlineOperatorIds() {
     const url = `/customers/${CUSTOMER_ID}/users`;
     try {
         const response = await http.get(url, { headers: API_HEADERS_JSON });
-
-        // ========= INÍCIO DO LOG DE DEPURAÇÃO =========
+        // MANTENDO O LOG DE RESPOSTA PARA ANÁLISE COMPLETA
         console.log("[DEPURAÇÃO] Resposta completa recebida da API /users:");
         console.log(JSON.stringify(response.data, null, 2));
-        // ========= FIM DO LOG DE DEPURAÇÃO =========
 
         const onlineIds = new Set();
         if (response.data && Array.isArray(response.data.data)) {
@@ -97,10 +89,7 @@ async function getOnlineOperatorIds() {
  * @returns {Promise<string[]>} Lista de IDs de operadores verdadeiramente disponíveis.
  */
 async function getAvailableOperators() {
-    // Passo 1: Pega a lista de quem está com status 'online' na plataforma
     const onlineIds = await getOnlineOperatorIds();
-
-    // Passo 2: Pega a lista de quem deveria estar trabalhando pelo horário
     const { hh } = nowInTimezone(TIMEZONE);
     let scheduledOperators = [...fullTimeOperatorIds];
     if (hh >= 9 && hh < 17) {
@@ -110,11 +99,7 @@ async function getAvailableOperators() {
         scheduledOperators.push(...timedOperators['12_18']);
     }
     scheduledOperators = [...new Set(scheduledOperators)];
-
-    // Passo 3: Retorna apenas os operadores que estão em AMBAS as listas
     const trulyAvailable = scheduledOperators.filter(id => onlineIds.has(id));
-    
-    // Retorna a lista ordenada para garantir consistência no ciclo do round-robin
     return trulyAvailable.sort();
 }
 
@@ -332,6 +317,12 @@ app.get("/", (_req, res) => res.sendStatus(200));
 // ================== WEBHOOK ==================
 app.post("/", async (req, res) => {
   const requestId = randomUUID();
+
+  // ========= INÍCIO DA VERIFICAÇÃO DE TOKEN =========
+  const token = process.env.POLI_API_TOKEN || '';
+  console.log(`[VERIFICAÇÃO DE TOKEN] Usando token: Início=[${token.slice(0, 8)}...], Fim=[...${token.slice(-8)}]`);
+  // ========= FIM DA VERIFICAÇÃO DE TOKEN =========
+
   console.log(`[${requestId}] ✅ Webhook da OLX recebido!`);
 
   if (
