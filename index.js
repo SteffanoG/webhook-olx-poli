@@ -59,37 +59,21 @@ const timedOperators = {
 const allTimedIds = [].concat(...Object.values(timedOperators));
 const fullTimeOperatorIds = operatorIds.filter(id => !allTimedIds.includes(id));
 
-// ========= LÓGICA DE STATUS REAL (API) COM DEPURAÇÃO =========
-async function getOnlineOperatorIds() {
-    const url = `/customers/${CUSTOMER_ID}/users`;
-    try {
-        const response = await http.get(url, { headers: API_HEADERS_JSON });
-        // MANTENDO O LOG DE RESPOSTA PARA ANÁLISE COMPLETA
-        console.log("[DEPURAÇÃO] Resposta completa recebida da API /users:");
-        console.log(JSON.stringify(response.data, null, 2));
+// ========= INÍCIO DAS NOVAS CONFIGURAÇÕES DE ROTEAMENTO =========
 
-        const onlineIds = new Set();
-        if (response.data && Array.isArray(response.data.data)) {
-            for (const user of response.data.data) {
-                if (user.status === 'online') {
-                    onlineIds.add(String(user.id));
-                }
-            }
-        }
-        return onlineIds;
-    } catch (error) {
-        console.error("Falha ao buscar status dos operadores na API da PoliChat:", error.message);
-        return new Set();
-    }
-}
+// 1. CONFIGURAÇÃO PARA LEADS DE SOROCABA
+const SOROCABA_PROPERTY_CODES = new Set(['46093', '56082', '19878', '91107', '87505', '44338', '47032']);
+const SOROCABA_OPERATOR_IDS = ['102229', '102232']; // ID da Noeli e da Ellen
 
+// 2. CONTADORES PARA AS DUAS FILAS (ROUND-ROBIN)
+let generalRoundRobinIndex = 0;
+let sorocabaRoundRobinIndex = 0;
 
 /**
- * Retorna uma lista de operadores que estão DENTRO DO HORÁRIO e com STATUS ONLINE.
- * @returns {Promise<string[]>} Lista de IDs de operadores verdadeiramente disponíveis.
+ * Retorna uma lista de operadores disponíveis APENAS PELO HORÁRIO.
+ * @returns {string[]} Lista de IDs de operadores disponíveis.
  */
-async function getAvailableOperators() {
-    const onlineIds = await getOnlineOperatorIds();
+function getAvailableOperatorsByTime() {
     const { hh } = nowInTimezone(TIMEZONE);
     let scheduledOperators = [...fullTimeOperatorIds];
     if (hh >= 9 && hh < 17) {
@@ -98,12 +82,10 @@ async function getAvailableOperators() {
     if (hh >= 12 && hh < 18) {
         scheduledOperators.push(...timedOperators['12_18']);
     }
-    scheduledOperators = [...new Set(scheduledOperators)];
-    const trulyAvailable = scheduledOperators.filter(id => onlineIds.has(id));
-    return trulyAvailable.sort();
+    // Retorna a lista ordenada para garantir consistência no ciclo
+    return [...new Set(scheduledOperators)].sort();
 }
-
-let roundRobinIndex = 0;
+// ========= FIM DAS NOVAS CONFIGURAÇÕES DE ROTEAMENTO =========
 
 
 // ================== UTILS ==================
@@ -183,7 +165,6 @@ function toTitleCasePtBr(raw = "") {
   if (!raw || typeof raw !== "string") return raw;
   const cleaned = raw.replace(/\s+/g, " ").trim();
   if (!cleaned) return cleaned;
-
   const words = cleaned.split(" ");
   const result = words.map((w, idx) => {
     const lower = w.toLowerCase();
@@ -198,7 +179,6 @@ function toTitleCasePtBr(raw = "") {
     }
     return capitalizePart(w);
   });
-
   return result.join(" ");
 }
 
@@ -240,42 +220,21 @@ function nowInTimezone(tz) {
   });
   const hourFmt = new Intl.DateTimeFormat("en-US", { timeZone: tz, hour: "2-digit", hour12: false });
   const dowFmt  = new Intl.DateTimeFormat("en-US", { timeZone: tz, weekday: "short" });
-
   const partsHour = hourFmt.formatToParts(d);
   const hh = Number(partsHour.find(p => p.type === "hour")?.value || "0");
-
   const weekMap = { "Sun":0, "Mon":1, "Tue":2, "Wed":3, "Thu":4, "Fri":5, "Sat":6 };
   const dow = weekMap[dowFmt.format(d)] ?? 0;
-
   return { date: d, hh, dow, fmtStr: fmt.format(d) };
 }
 
 function selectTemplateForNow() {
   const { hh, dow } = nowInTimezone(TIMEZONE);
   let dentroHorario = false;
-
   switch (dow) {
-    case 0:
-      dentroHorario = false;
-      break;
-
-    case 1:
-    case 2:
-    case 3:
-    case 4:
-    case 5:
-      if (hh >= 9 && hh < 20) {
-        dentroHorario = true;
-      }
-      break;
-
-    case 6:
-      if (hh >= 9 && hh < 13) {
-        dentroHorario = true;
-      }
-      break;
+    case 0: dentroHorario = false; break;
+    case 1: case 2: case 3: case 4: case 5: if (hh >= 9 && hh < 20) { dentroHorario = true; } break;
+    case 6: if (hh >= 9 && hh < 13) { dentroHorario = true; } break;
   }
-
   const chosenTemplate = dentroHorario ? TEMPLATE_ID : (OFF_HOURS_TEMPLATE_ID || TEMPLATE_ID);
   return { dentroHorario, chosenTemplate };
 }
@@ -286,21 +245,16 @@ function normalizeLeadPayload(body = {}) {
   const email = body.email ?? null;
   const rawPhone = body.phoneNumber ?? body.phone ?? null;
   const phoneDigits = rawPhone ? String(rawPhone).replace(/\D/g, "") : null;
-
   const propertyCode =
     body.clientListingId ?? body.listing ?? body.clientListingCode ?? body.cod ?? null;
-
   const originLeadId = body.originLeadId ?? body.leadId ?? null;
-
   const name = NAME_NORMALIZE_ENABLED && rawName ? toTitleCasePtBr(rawName) : rawName;
-
   return { name, email, phoneDigits, propertyCode, originLeadId };
 }
 
 // ================== ANTI-DUP / ANTI-REENVIO (IN-MEM) ==================
 const recentLeads = new Map();
 const recentSends = new Map();
-
 setInterval(() => {
   const now = Date.now();
   for (const [k, v] of recentLeads.entries()) {
@@ -317,21 +271,9 @@ app.get("/", (_req, res) => res.sendStatus(200));
 // ================== WEBHOOK ==================
 app.post("/", async (req, res) => {
   const requestId = randomUUID();
-
-  // ========= INÍCIO DA VERIFICAÇÃO DE TOKEN =========
-  const token = process.env.POLI_API_TOKEN || '';
-  console.log(`[VERIFICAÇÃO DE TOKEN] Usando token: Início=[${token.slice(0, 8)}...], Fim=[...${token.slice(-8)}]`);
-  // ========= FIM DA VERIFICAÇÃO DE TOKEN =========
-
   console.log(`[${requestId}] ✅ Webhook da OLX recebido!`);
 
-  if (
-    !operatorIds.length ||
-    !CUSTOMER_ID ||
-    !CHANNEL_ID ||
-    !TEMPLATE_ID ||
-    !Object.keys(operatorNamesMap).length
-  ) {
+  if (!operatorIds.length || !CUSTOMER_ID || !CHANNEL_ID || !TEMPLATE_ID || !Object.keys(operatorNamesMap).length) {
     console.error(`[${requestId}] ❌ ERRO CRÍTICO: Variáveis de ambiente ausentes.`);
     return res.status(500).json({ error: "Erro de configuração do servidor." });
   }
@@ -343,10 +285,7 @@ app.post("/", async (req, res) => {
   
   const leadEmail = email || "não informado";
 
-  const { fmtStr, dow } = (() => {
-    const n = nowInTimezone(TIMEZONE);
-    return { fmtStr: n.fmtStr, dow: n.dow };
-  })();
+  const { fmtStr, dow } = (() => { const n = nowInTimezone(TIMEZONE); return { fmtStr: n.fmtStr, dow: n.dow }; })();
   const sel = selectTemplateForNow();
   console.log(`[${requestId}] Lead:`, JSON.stringify({ name, email: leadEmail, phone: maskPhone(phoneDigits), listing: propertyCode, originLeadId }));
   console.log(`[${requestId}] Agora: ${fmtStr} | DOW=${dow} (0=Dom..6=Sáb) | dentroHorario=${sel.dentroHorario} | template=${sel.chosenTemplate}`);
@@ -355,12 +294,8 @@ app.post("/", async (req, res) => {
   const now = Date.now();
   const seen = recentLeads.get(idemKey);
   if (seen) {
-      if (seen.status === "done" && now - seen.ts < IDEMPOTENCY_TTL_MS) {
-          return res.status(200).json({ status: "Lead ignorado (duplicado recente)." });
-      }
-      if (seen.status === "inflight") {
-          return res.status(202).json({ status: "Lead em processamento." });
-      }
+      if (seen.status === "done" && now - seen.ts < IDEMPOTENCY_TTL_MS) { return res.status(200).json({ status: "Lead ignorado (duplicado recente)." }); }
+      if (seen.status === "inflight") { return res.status(202).json({ status: "Lead em processamento." }); }
   }
   recentLeads.set(idemKey, { ts: now, status: "inflight" });
 
@@ -383,20 +318,35 @@ app.post("/", async (req, res) => {
 
     let assignedOperatorId = contactDetails.user_id || contactDetails.userId || null;
     if (!assignedOperatorId) {
-      const availableOperators = await getAvailableOperators();
-      console.log(`[${requestId}] Operadores verdadeiramente disponíveis (horário E status online): ${availableOperators.join(', ')}`);
+      // ========= INÍCIO DA NOVA LÓGICA DE ROTEAMENTO =========
+      const isSorocabaLead = SOROCABA_PROPERTY_CODES.has(String(propertyCode));
 
-      const operatorsToChooseFrom = availableOperators.length > 0 ? availableOperators : operatorIds.sort();
+      if (isSorocabaLead) {
+        console.log(`[${requestId}] Lead de Sorocaba detectado. Roteando para a fila especial.`);
+        const operatorIndex = sorocabaRoundRobinIndex % SOROCABA_OPERATOR_IDS.length;
+        assignedOperatorId = Number(SOROCABA_OPERATOR_IDS[operatorIndex]);
+        sorocabaRoundRobinIndex++;
+        console.log(`[${requestId}] Novo lead de Sorocaba atribuído ao operador ${assignedOperatorId} (posição ${operatorIndex} do ciclo)`);
+      } else {
+        const availableOperators = getAvailableOperatorsByTime();
+        console.log(`[${requestId}] Operadores disponíveis por horário: ${availableOperators.join(', ')}`);
+        
+        const operatorsToChooseFrom = availableOperators.length > 0 ? availableOperators : operatorIds.sort();
 
-      if (operatorsToChooseFrom.length > 0) {
-        const operatorIndex = roundRobinIndex % operatorsToChooseFrom.length;
-        assignedOperatorId = Number(operatorsToChooseFrom[operatorIndex]);
-        roundRobinIndex++;
+        if (operatorsToChooseFrom.length > 0) {
+          const operatorIndex = generalRoundRobinIndex % operatorsToChooseFrom.length;
+          assignedOperatorId = Number(operatorsToChooseFrom[operatorIndex]);
+          generalRoundRobinIndex++;
+          console.log(`[${requestId}] Novo lead geral atribuído ao operador ${assignedOperatorId} (posição ${operatorIndex} do ciclo)`);
+        }
+      }
+      
+      if (assignedOperatorId) {
         await assignContactToOperator(contactId, assignedOperatorId, requestId);
-        console.log(`[${requestId}] Novo lead atribuído ao operador ${assignedOperatorId} (posição ${operatorIndex} do ciclo)`);
       } else {
         console.warn(`[${requestId}] Nenhum operador disponível para atribuição. O lead ${contactId} não foi atribuído.`);
       }
+      // ========= FIM DA NOVA LÓGICA DE ROTEAMENTO =========
     }
 
     const operatorName = operatorNamesMap[assignedOperatorId] || "um de nossos consultores";
@@ -409,15 +359,7 @@ app.post("/", async (req, res) => {
       return res.status(200).json({ status: "Envio suprimido por cooldown de template." });
     }
     
-    const audit = await sendTemplateMessage(
-      contactId,
-      assignedOperatorId,
-      desiredName,
-      operatorName,
-      channelForSend,
-      templateToSend,
-      requestId
-    );
+    const audit = await sendTemplateMessage(contactId, assignedOperatorId, desiredName, operatorName, channelForSend, templateToSend, requestId);
     console.log(`[${requestId}] Template enviado com sucesso.`, JSON.stringify(audit));
 
     recentSends.set(sendKey, { ts: Date.now() });
@@ -440,7 +382,6 @@ async function ensureContactExists(name, phoneDigits, reqId, extras = {}) {
   form.append("phone", phoneDigits);
   if (extras?.email) form.append("email", extras.email);
   if (extras?.propertyCode) form.append("cpf", String(extras.propertyCode).padStart(11, "0"));
-
   try {
     const resp = await postWithRetry(
       url, form,
@@ -495,18 +436,15 @@ async function sendTemplateMessage(
   const url = `/customers/${CUSTOMER_ID}/whatsapp/send_template/channels/${channelId}/contacts/${contactId}/users/${userId}`;
   
   const params = JSON.stringify([contactName, operatorName]);
-
   const form = new URLSearchParams();
   form.append("quick_message_id", templateIdToUse);
   form.append("parameters", params);
-
   const resp = await postWithRetry(
     url,
     form,
     { headers: { Authorization: `Bearer ${POLI_API_TOKEN}`, "Content-Type": "application/x-www-form-urlencoded", Accept: "application/json" } },
     reqId, "send_template"
   );
-
   const body = resp?.data || {};
   if (body?.success === false || body?.send === false) {
     throw new Error(`Template aceito mas não enviado: ${JSON.stringify(body)}`);
