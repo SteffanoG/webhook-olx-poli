@@ -59,20 +59,13 @@ const timedOperators = {
 const allTimedIds = [].concat(...Object.values(timedOperators));
 const fullTimeOperatorIds = operatorIds.filter(id => !allTimedIds.includes(id));
 
-// ========= INÍCIO DAS NOVAS CONFIGURAÇÕES DE ROTEAMENTO =========
-
-// 1. CONFIGURAÇÃO PARA LEADS DE SOROCABA
+// ========= CONFIGURAÇÕES DE ROTEAMENTO =========
 const SOROCABA_PROPERTY_CODES = new Set(['46093', '56082', '19878', '91107', '87505', '44338', '47032']);
 const SOROCABA_OPERATOR_IDS = ['102229', '102232']; // ID da Noeli e da Ellen
 
-// 2. CONTADORES PARA AS DUAS FILAS (ROUND-ROBIN)
 let generalRoundRobinIndex = 0;
 let sorocabaRoundRobinIndex = 0;
 
-/**
- * Retorna uma lista de operadores disponíveis APENAS PELO HORÁRIO.
- * @returns {string[]} Lista de IDs de operadores disponíveis.
- */
 function getAvailableOperatorsByTime() {
     const { hh } = nowInTimezone(TIMEZONE);
     let scheduledOperators = [...fullTimeOperatorIds];
@@ -82,11 +75,8 @@ function getAvailableOperatorsByTime() {
     if (hh >= 12 && hh < 18) {
         scheduledOperators.push(...timedOperators['12_18']);
     }
-    // Retorna a lista ordenada para garantir consistência no ciclo
     return [...new Set(scheduledOperators)].sort();
 }
-// ========= FIM DAS NOVAS CONFIGURAÇÕES DE ROTEAMENTO =========
-
 
 // ================== UTILS ==================
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -318,7 +308,6 @@ app.post("/", async (req, res) => {
 
     let assignedOperatorId = contactDetails.user_id || contactDetails.userId || null;
     if (!assignedOperatorId) {
-      // ========= INÍCIO DA NOVA LÓGICA DE ROTEAMENTO =========
       const isSorocabaLead = SOROCABA_PROPERTY_CODES.has(String(propertyCode));
 
       if (isSorocabaLead) {
@@ -346,7 +335,6 @@ app.post("/", async (req, res) => {
       } else {
         console.warn(`[${requestId}] Nenhum operador disponível para atribuição. O lead ${contactId} não foi atribuído.`);
       }
-      // ========= FIM DA NOVA LÓGICA DE ROTEAMENTO =========
     }
 
     const operatorName = operatorNamesMap[assignedOperatorId] || "um de nossos consultores";
@@ -363,7 +351,7 @@ app.post("/", async (req, res) => {
     console.log(`[${requestId}] Template enviado com sucesso.`, JSON.stringify(audit));
 
     recentSends.set(sendKey, { ts: Date.now() });
-    recentLeads.set(idemKey, { ts: Date.now(), status: "done" });
+    recentSends.set(idemKey, { ts: Date.now(), status: "done" });
 
     return res.status(200).json({ status: "Lead recebido e processado com sucesso." });
   } catch (error) {
@@ -375,6 +363,8 @@ app.post("/", async (req, res) => {
 });
 
 // ================== FUNÇÕES ==================
+
+// ========= INÍCIO DA CORREÇÃO =========
 async function ensureContactExists(name, phoneDigits, reqId, extras = {}) {
   const url = `/customers/${CUSTOMER_ID}/contacts`;
   const form = new URLSearchParams();
@@ -382,6 +372,7 @@ async function ensureContactExists(name, phoneDigits, reqId, extras = {}) {
   form.append("phone", phoneDigits);
   if (extras?.email) form.append("email", extras.email);
   if (extras?.propertyCode) form.append("cpf", String(extras.propertyCode).padStart(11, "0"));
+
   try {
     const resp = await postWithRetry(
       url, form,
@@ -392,11 +383,16 @@ async function ensureContactExists(name, phoneDigits, reqId, extras = {}) {
     if (!id) throw new Error("Criação de contato sem ID na resposta.");
     return id;
   } catch (error) {
-    const maybeId = error?.response?.data?.data?.id ?? error?.response?.data?.id ?? null;
-    if (maybeId) return maybeId;
+    // CORREÇÃO: Adicionada a verificação para `error.response.data.contact.id`
+    const maybeId = error?.response?.data?.contact?.id ?? error?.response?.data?.data?.id ?? error?.response?.data?.id ?? null;
+    if (maybeId) {
+        console.log(`[${reqId}] Contato já existente encontrado com ID: ${maybeId}`);
+        return maybeId;
+    }
     throw error;
   }
 }
+// ========= FIM DA CORREÇÃO =========
 
 async function getContactDetails(contactId, reqId) {
   const url = `/customers/${CUSTOMER_ID}/contacts/${contactId}`;
