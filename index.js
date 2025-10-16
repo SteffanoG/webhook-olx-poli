@@ -15,7 +15,7 @@ const TEMPLATE_ID = process.env.TEMPLATE_ID;
 const OFF_HOURS_TEMPLATE_ID = process.env.OFF_HOURS_TEMPLATE_ID || null;
 const OPERATOR_NAMES_MAP = process.env.OPERATOR_NAMES_MAP;
 
-const BASE_URL = "https://app.polichat.com.br/api/v1";
+const BASE_URL = "https://app.polichat.com.br/api/v1"; // API OPERACIONAL
 const AXIOS_TIMEOUT_MS = Number(process.env.AXIOS_TIMEOUT_MS || 10000);
 const IDEMPOTENCY_TTL_MS = Number(process.env.IDEMPOTENCY_TTL_MS || 10 * 60 * 1000); // 10min
 const SEND_COOLDOWN_MS = Number(process.env.SEND_COOLDOWN_MS || 30 * 60 * 1000);     // 30min
@@ -38,11 +38,8 @@ const http = axios.create({
   headers: { Authorization: `Bearer ${POLI_API_TOKEN}`, Accept: "application/json" },
 });
 
-// ================== OPERADORES ==================
-const operatorIds = (process.env.OPERATOR_IDS || "")
-  .replace(/\s/g, "")
-  .split(",")
-  .filter(Boolean);
+// ================== OPERADORES E ROTEAMENTO ==================
+const operatorIds = (process.env.OPERATOR_IDS || "").replace(/\s/g, "").split(",").filter(Boolean);
 
 let operatorNamesMap = {};
 try {
@@ -51,31 +48,55 @@ try {
   console.error("ERRO CRÍTICO: Formato inválido em OPERATOR_NAMES_MAP. Deve ser JSON.", e);
 }
 
-// ========= LÓGICA DE DISTRIBUIÇÃO POR HORÁRIO =========
 const timedOperators = {
-    '09_17': ['102715', '103194', '102234'], // Cleber, Adaene e Henrique (09:00 às 16:59)
-    '12_18': ['102235']                      // Charles (12:00 às 17:59)
+    '09_17': ['102715', '103194', '102234'], // Cleber, Adaene e Henrique
+    '12_18': ['102235']                      // Charles
 };
 const allTimedIds = [].concat(...Object.values(timedOperators));
 const fullTimeOperatorIds = operatorIds.filter(id => !allTimedIds.includes(id));
 
-// ========= CONFIGURAÇÕES DE ROTEAMENTO =========
 const SOROCABA_PROPERTY_CODES = new Set(['46093', '56082', '19878', '91107', '87505', '44338', '47032']);
-const SOROCABA_OPERATOR_IDS = ['102229', '102232']; // ID da Noeli e da Ellen
+const SOROCABA_OPERATOR_IDS = ['102229', '102232']; // Noeli e Ellen
 
 let generalRoundRobinIndex = 0;
 let sorocabaRoundRobinIndex = 0;
 
-function getAvailableOperatorsByTime() {
+// ========= NOVA LÓGICA DE VERIFICAÇÃO DE STATUS (API DE GESTÃO) =========
+async function getServiceAvailableOperatorIds() {
+    // URL completa da API de Gestão (Revendedor)
+    const url = `https://labrev.polichat.com.br/user/company/${CUSTOMER_ID}`;
+    const availableIds = new Set();
+    
+    try {
+        const response = await axios.get(url, { headers: API_HEADERS_JSON });
+
+        console.log("[DIAGNÓSTICO] Resposta da API de Gestão (/user/company):");
+        console.log(JSON.stringify(response.data, null, 2));
+
+        if (response.data && Array.isArray(response.data.data)) {
+            for (const user of response.data.data) {
+                // Verificando se o campo `available_service` é igual a 1
+                if (user.available_service === 1) {
+                    availableIds.add(String(user.id));
+                }
+            }
+        }
+        return availableIds;
+    } catch (error) {
+        console.error("Falha ao buscar status 'available_service' dos operadores:", error.message);
+        if (error.response) {
+            console.error("Resposta do erro da API de Gestão:", JSON.stringify(error.response.data));
+        }
+        return availableIds;
+    }
+}
+
+function getOperatorsByTime() {
     const { hh } = nowInTimezone(TIMEZONE);
     let scheduledOperators = [...fullTimeOperatorIds];
-    if (hh >= 9 && hh < 17) {
-        scheduledOperators.push(...timedOperators['09_17']);
-    }
-    if (hh >= 12 && hh < 18) {
-        scheduledOperators.push(...timedOperators['12_18']);
-    }
-    return [...new Set(scheduledOperators)].sort();
+    if (hh >= 9 && hh < 17) scheduledOperators.push(...timedOperators['09_17']);
+    if (hh >= 12 && hh < 18) scheduledOperators.push(...timedOperators['12_18']);
+    return [...new Set(scheduledOperators)];
 }
 
 // ================== UTILS ==================
@@ -155,6 +176,7 @@ function toTitleCasePtBr(raw = "") {
   if (!raw || typeof raw !== "string") return raw;
   const cleaned = raw.replace(/\s+/g, " ").trim();
   if (!cleaned) return cleaned;
+
   const words = cleaned.split(" ");
   const result = words.map((w, idx) => {
     const lower = w.toLowerCase();
@@ -169,6 +191,7 @@ function toTitleCasePtBr(raw = "") {
     }
     return capitalizePart(w);
   });
+
   return result.join(" ");
 }
 
@@ -210,21 +233,42 @@ function nowInTimezone(tz) {
   });
   const hourFmt = new Intl.DateTimeFormat("en-US", { timeZone: tz, hour: "2-digit", hour12: false });
   const dowFmt  = new Intl.DateTimeFormat("en-US", { timeZone: tz, weekday: "short" });
+
   const partsHour = hourFmt.formatToParts(d);
   const hh = Number(partsHour.find(p => p.type === "hour")?.value || "0");
+
   const weekMap = { "Sun":0, "Mon":1, "Tue":2, "Wed":3, "Thu":4, "Fri":5, "Sat":6 };
   const dow = weekMap[dowFmt.format(d)] ?? 0;
+
   return { date: d, hh, dow, fmtStr: fmt.format(d) };
 }
 
 function selectTemplateForNow() {
   const { hh, dow } = nowInTimezone(TIMEZONE);
   let dentroHorario = false;
+
   switch (dow) {
-    case 0: dentroHorario = false; break;
-    case 1: case 2: case 3: case 4: case 5: if (hh >= 9 && hh < 20) { dentroHorario = true; } break;
-    case 6: if (hh >= 9 && hh < 13) { dentroHorario = true; } break;
+    case 0:
+      dentroHorario = false;
+      break;
+
+    case 1:
+    case 2:
+    case 3:
+    case 4:
+    case 5:
+      if (hh >= 9 && hh < 20) {
+        dentroHorario = true;
+      }
+      break;
+
+    case 6:
+      if (hh >= 9 && hh < 13) {
+        dentroHorario = true;
+      }
+      break;
   }
+
   const chosenTemplate = dentroHorario ? TEMPLATE_ID : (OFF_HOURS_TEMPLATE_ID || TEMPLATE_ID);
   return { dentroHorario, chosenTemplate };
 }
@@ -235,16 +279,21 @@ function normalizeLeadPayload(body = {}) {
   const email = body.email ?? null;
   const rawPhone = body.phoneNumber ?? body.phone ?? null;
   const phoneDigits = rawPhone ? String(rawPhone).replace(/\D/g, "") : null;
+
   const propertyCode =
     body.clientListingId ?? body.listing ?? body.clientListingCode ?? body.cod ?? null;
+
   const originLeadId = body.originLeadId ?? body.leadId ?? null;
+
   const name = NAME_NORMALIZE_ENABLED && rawName ? toTitleCasePtBr(rawName) : rawName;
+
   return { name, email, phoneDigits, propertyCode, originLeadId };
 }
 
 // ================== ANTI-DUP / ANTI-REENVIO (IN-MEM) ==================
 const recentLeads = new Map();
 const recentSends = new Map();
+
 setInterval(() => {
   const now = Date.now();
   for (const [k, v] of recentLeads.entries()) {
@@ -309,31 +358,41 @@ app.post("/", async (req, res) => {
     let assignedOperatorId = contactDetails.user_id || contactDetails.userId || null;
     if (!assignedOperatorId) {
       const isSorocabaLead = SOROCABA_PROPERTY_CODES.has(String(propertyCode));
+      const operatorsInShift = getOperatorsByTime();
+      const serviceAvailableOperators = await getServiceAvailableOperatorIds();
 
       if (isSorocabaLead) {
         console.log(`[${requestId}] Lead de Sorocaba detectado. Roteando para a fila especial.`);
         const operatorIndex = sorocabaRoundRobinIndex % SOROCABA_OPERATOR_IDS.length;
         assignedOperatorId = Number(SOROCABA_OPERATOR_IDS[operatorIndex]);
         sorocabaRoundRobinIndex++;
-        console.log(`[${requestId}] Novo lead de Sorocaba atribuído ao operador ${assignedOperatorId} (posição ${operatorIndex} do ciclo)`);
+        console.log(`[${requestId}] Novo lead de Sorocaba atribuído ao operador ${assignedOperatorId}`);
+
       } else {
-        const availableOperators = getAvailableOperatorsByTime();
-        console.log(`[${requestId}] Operadores disponíveis por horário: ${availableOperators.join(', ')}`);
+        const trulyAvailableOperators = operatorsInShift.filter(id => serviceAvailableOperators.has(id)).sort();
+        console.log(`[${requestId}] Operadores no horário: [${operatorsInShift.join(', ')}]`);
+        console.log(`[${requestId}] Operadores com status 'Disponível': [${Array.from(serviceAvailableOperators).join(', ')}]`);
+        console.log(`[${requestId}] Operadores verdadeiramente disponíveis: [${trulyAvailableOperators.join(', ')}]`);
         
-        const operatorsToChooseFrom = availableOperators.length > 0 ? availableOperators : operatorIds.sort();
+        let operatorsToChooseFrom = trulyAvailableOperators;
+
+        if (operatorsToChooseFrom.length === 0) {
+          console.warn(`[${requestId}] Nenhum operador 'Disponível'. Usando fallback para operadores no horário.`);
+          operatorsToChooseFrom = operatorsInShift.sort();
+        }
 
         if (operatorsToChooseFrom.length > 0) {
           const operatorIndex = generalRoundRobinIndex % operatorsToChooseFrom.length;
           assignedOperatorId = Number(operatorsToChooseFrom[operatorIndex]);
           generalRoundRobinIndex++;
-          console.log(`[${requestId}] Novo lead geral atribuído ao operador ${assignedOperatorId} (posição ${operatorIndex} do ciclo)`);
+          console.log(`[${requestId}] Novo lead geral atribuído ao operador ${assignedOperatorId}`);
         }
       }
       
       if (assignedOperatorId) {
         await assignContactToOperator(contactId, assignedOperatorId, requestId);
       } else {
-        console.warn(`[${requestId}] Nenhum operador disponível para atribuição. O lead ${contactId} não foi atribuído.`);
+        console.warn(`[${requestId}] Nenhum operador pôde ser atribuído para o lead ${contactId}.`);
       }
     }
 
@@ -351,7 +410,7 @@ app.post("/", async (req, res) => {
     console.log(`[${requestId}] Template enviado com sucesso.`, JSON.stringify(audit));
 
     recentSends.set(sendKey, { ts: Date.now() });
-    recentSends.set(idemKey, { ts: Date.now(), status: "done" });
+    recentLeads.set(idemKey, { ts: Date.now(), status: "done" });
 
     return res.status(200).json({ status: "Lead recebido e processado com sucesso." });
   } catch (error) {
@@ -363,8 +422,6 @@ app.post("/", async (req, res) => {
 });
 
 // ================== FUNÇÕES ==================
-
-// ========= INÍCIO DA CORREÇÃO =========
 async function ensureContactExists(name, phoneDigits, reqId, extras = {}) {
   const url = `/customers/${CUSTOMER_ID}/contacts`;
   const form = new URLSearchParams();
@@ -383,7 +440,6 @@ async function ensureContactExists(name, phoneDigits, reqId, extras = {}) {
     if (!id) throw new Error("Criação de contato sem ID na resposta.");
     return id;
   } catch (error) {
-    // CORREÇÃO: Adicionada a verificação para `error.response.data.contact.id`
     const maybeId = error?.response?.data?.contact?.id ?? error?.response?.data?.data?.id ?? error?.response?.data?.id ?? null;
     if (maybeId) {
         console.log(`[${reqId}] Contato já existente encontrado com ID: ${maybeId}`);
@@ -392,7 +448,6 @@ async function ensureContactExists(name, phoneDigits, reqId, extras = {}) {
     throw error;
   }
 }
-// ========= FIM DA CORREÇÃO =========
 
 async function getContactDetails(contactId, reqId) {
   const url = `/customers/${CUSTOMER_ID}/contacts/${contactId}`;
