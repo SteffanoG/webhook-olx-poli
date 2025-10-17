@@ -55,15 +55,15 @@ const timedOperators = {
 const allTimedIds = [].concat(...Object.values(timedOperators));
 const fullTimeOperatorIds = operatorIds.filter(id => !allTimedIds.includes(id));
 
-const SOROCABA_PROPERTY_CODES = new Set(['46093', '56082', '19878', '91107', '87505', '44338', '47032']);
-const SOROCABA_OPERATOR_IDS = ['102229', '102232']; // Noeli e Ellen
+// ALTERAÇÃO: Lendo a lista de imóveis do ambiente
+const SOROCABA_PROPERTY_CODES = new Set((process.env.SOROCABA_PROPERTY_CODES || "").split(","));
+const SOROCABA_OPERATOR_IDS = ['102228', '102232']; // ID CORRIGIDO da Noeli e Ellen
 
 let generalRoundRobinIndex = 0;
 let sorocabaRoundRobinIndex = 0;
 
-// ========= NOVA LÓGICA DE VERIFICAÇÃO DE STATUS (API DE GESTÃO) =========
+// ========= LÓGICA DE VERIFICAÇÃO DE STATUS (API DE GESTÃO) =========
 async function getServiceAvailableOperatorIds() {
-    // URL completa da API de Gestão (Revendedor)
     const url = `https://labrev.polichat.com.br/user/company/${CUSTOMER_ID}`;
     const availableIds = new Set();
     
@@ -75,7 +75,6 @@ async function getServiceAvailableOperatorIds() {
 
         if (response.data && Array.isArray(response.data.data)) {
             for (const user of response.data.data) {
-                // Verificando se o campo `available_service` é igual a 1
                 if (user.available_service === 1) {
                     availableIds.add(String(user.id));
                 }
