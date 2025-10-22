@@ -49,7 +49,7 @@ try {
 }
 
 const timedOperators = {
-    '09_17': ['102715', '103194', '102234'], // Cleber, Adaene e Henrique
+    '09_17': ['103194', '102234'], // Adaene e Henrique
     '12_18': ['102235']                      // Charles
 };
 const allTimedIds = [].concat(...Object.values(timedOperators));
