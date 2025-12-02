@@ -11,8 +11,17 @@ app.use(express.json());
 const POLI_API_TOKEN = process.env.POLI_API_TOKEN;
 const CUSTOMER_ID = process.env.CUSTOMER_ID;
 const CHANNEL_ID = Number(process.env.CHANNEL_ID); // fallback
-const TEMPLATE_ID = process.env.TEMPLATE_ID;
+
+// CONFIGURAÇÃO DE TEMPLATES (ROTAÇÃO)
+// Lê a lista de templates do .env, separada por vírgulas
+const TEMPLATE_IDS_IN_HOURS = (process.env.TEMPLATE_IDS_IN_HOURS || "").split(",").filter(Boolean);
 const OFF_HOURS_TEMPLATE_ID = process.env.OFF_HOURS_TEMPLATE_ID || null;
+
+// Se não houver lista, usa o template antigo como fallback único (segurança)
+if (TEMPLATE_IDS_IN_HOURS.length === 0 && process.env.TEMPLATE_ID) {
+    TEMPLATE_IDS_IN_HOURS.push(process.env.TEMPLATE_ID);
+}
+
 const OPERATOR_NAMES_MAP = process.env.OPERATOR_NAMES_MAP;
 
 const BASE_URL = "https://app.polichat.com.br/api/v1"; // API OPERACIONAL
@@ -48,19 +57,22 @@ try {
   console.error("ERRO CRÍTICO: Formato inválido em OPERATOR_NAMES_MAP. Deve ser JSON.", e);
 }
 
+// Lendo as regras de roteamento do ambiente
+const SOROCABA_PROPERTY_CODES = new Set((process.env.SOROCABA_PROPERTY_CODES || "").split(","));
+const SOROCABA_OPERATOR_IDS = (process.env.SOROCABA_OPERATOR_IDS || "").split(",").filter(Boolean);
+
 const timedOperators = {
-    '09_17': ['103194', '102234'], // Adaene e Henrique
-    '12_18': ['102235']                      // Charles
+    '09_17': (process.env.OPERATORS_SHIFT_09_17 || "").split(",").filter(Boolean),
+    '12_18': (process.env.OPERATORS_SHIFT_12_18 || "").split(",").filter(Boolean)
 };
+
 const allTimedIds = [].concat(...Object.values(timedOperators));
 const fullTimeOperatorIds = operatorIds.filter(id => !allTimedIds.includes(id));
 
-// ALTERAÇÃO: Lendo a lista de imóveis do ambiente
-const SOROCABA_PROPERTY_CODES = new Set((process.env.SOROCABA_PROPERTY_CODES || "").split(","));
-const SOROCABA_OPERATOR_IDS = ['102228', '102232']; // ID CORRIGIDO da Noeli e Ellen
-
+// Contadores para filas (Round-Robin)
 let generalRoundRobinIndex = 0;
 let sorocabaRoundRobinIndex = 0;
+let templateRoundRobinIndex = 0; // Novo contador para templates
 
 // ========= LÓGICA DE VERIFICAÇÃO DE STATUS (API DE GESTÃO) =========
 async function getServiceAvailableOperatorIds() {
@@ -71,7 +83,7 @@ async function getServiceAvailableOperatorIds() {
         const response = await axios.get(url, { headers: API_HEADERS_JSON });
 
         console.log("[DIAGNÓSTICO] Resposta da API de Gestão (/user/company):");
-        console.log(JSON.stringify(response.data, null, 2));
+        // console.log(JSON.stringify(response.data, null, 2)); // Comentado para poluir menos o log
 
         if (response.data && Array.isArray(response.data.data)) {
             for (const user of response.data.data) {
@@ -268,7 +280,25 @@ function selectTemplateForNow() {
       break;
   }
 
-  const chosenTemplate = dentroHorario ? TEMPLATE_ID : (OFF_HOURS_TEMPLATE_ID || TEMPLATE_ID);
+  // Lógica de Rotação de Template
+  let chosenTemplate;
+  if (dentroHorario) {
+      if (TEMPLATE_IDS_IN_HOURS.length > 0) {
+          const tIndex = templateRoundRobinIndex % TEMPLATE_IDS_IN_HOURS.length;
+          chosenTemplate = TEMPLATE_IDS_IN_HOURS[tIndex];
+          // Só incrementamos o contador se realmente formos usar (feita a lógica no envio)
+          // Mas para simplificar, incrementamos aqui e retornamos o escolhido.
+          // OBS: O incremento real idealmente ficaria no momento do envio para não pular em erros,
+          // mas para manter simples a função select, vamos deixar a decisão lá embaixo
+          // ou retornar o index para incrementar depois. 
+          // Vamos retornar o template já escolhido.
+      } else {
+          chosenTemplate = null; // Fallback
+      }
+  } else {
+      chosenTemplate = OFF_HOURS_TEMPLATE_ID;
+  }
+
   return { dentroHorario, chosenTemplate };
 }
 
@@ -311,7 +341,7 @@ app.post("/", async (req, res) => {
   const requestId = randomUUID();
   console.log(`[${requestId}] ✅ Webhook da OLX recebido!`);
 
-  if (!operatorIds.length || !CUSTOMER_ID || !CHANNEL_ID || !TEMPLATE_ID || !Object.keys(operatorNamesMap).length) {
+  if (!operatorIds.length || !CUSTOMER_ID || !CHANNEL_ID || !Object.keys(operatorNamesMap).length) {
     console.error(`[${requestId}] ❌ ERRO CRÍTICO: Variáveis de ambiente ausentes.`);
     return res.status(500).json({ error: "Erro de configuração do servidor." });
   }
@@ -324,7 +354,14 @@ app.post("/", async (req, res) => {
   const leadEmail = email || "não informado";
 
   const { fmtStr, dow } = (() => { const n = nowInTimezone(TIMEZONE); return { fmtStr: n.fmtStr, dow: n.dow }; })();
+  
+  // Seleção do Template com Rotação
   const sel = selectTemplateForNow();
+  // Se estiver no horário e tivermos templates na lista, incrementamos o contador global
+  if (sel.dentroHorario && TEMPLATE_IDS_IN_HOURS.length > 0) {
+      templateRoundRobinIndex++;
+  }
+
   console.log(`[${requestId}] Lead:`, JSON.stringify({ name, email: leadEmail, phone: maskPhone(phoneDigits), listing: propertyCode, originLeadId }));
   console.log(`[${requestId}] Agora: ${fmtStr} | DOW=${dow} (0=Dom..6=Sáb) | dentroHorario=${sel.dentroHorario} | template=${sel.chosenTemplate}`);
 
@@ -365,7 +402,7 @@ app.post("/", async (req, res) => {
         const operatorIndex = sorocabaRoundRobinIndex % SOROCABA_OPERATOR_IDS.length;
         assignedOperatorId = Number(SOROCABA_OPERATOR_IDS[operatorIndex]);
         sorocabaRoundRobinIndex++;
-        console.log(`[${requestId}] Novo lead de Sorocaba atribuído ao operador ${assignedOperatorId}`);
+        console.log(`[${requestId}] Novo lead de Sorocaba atribuído ao operador ${assignedOperatorId} (${operatorNamesMap[assignedOperatorId] || 'Nome não encontrado'})`);
 
       } else {
         const trulyAvailableOperators = operatorsInShift.filter(id => serviceAvailableOperators.has(id)).sort();
@@ -373,18 +410,23 @@ app.post("/", async (req, res) => {
         console.log(`[${requestId}] Operadores com status 'Disponível': [${Array.from(serviceAvailableOperators).join(', ')}]`);
         console.log(`[${requestId}] Operadores verdadeiramente disponíveis: [${trulyAvailableOperators.join(', ')}]`);
         
-        let operatorsToChooseFrom = trulyAvailableOperators;
+        let operatorsToChooseFrom;
 
-        if (operatorsToChooseFrom.length === 0) {
-          console.warn(`[${requestId}] Nenhum operador 'Disponível'. Usando fallback para operadores no horário.`);
-          operatorsToChooseFrom = operatorsInShift.sort();
+        if (trulyAvailableOperators.length > 0) {
+            operatorsToChooseFrom = trulyAvailableOperators;
+        } else if (operatorsInShift.length > 0) {
+            console.warn(`[${requestId}] Nenhum operador 'Disponível'. Usando fallback para operadores no horário.`);
+            operatorsToChooseFrom = operatorsInShift.sort();
+        } else {
+            console.warn(`[${requestId}] Nenhum operador no horário. Usando fallback para TODOS os operadores.`);
+            operatorsToChooseFrom = operatorIds.sort();
         }
 
         if (operatorsToChooseFrom.length > 0) {
           const operatorIndex = generalRoundRobinIndex % operatorsToChooseFrom.length;
           assignedOperatorId = Number(operatorsToChooseFrom[operatorIndex]);
           generalRoundRobinIndex++;
-          console.log(`[${requestId}] Novo lead geral atribuído ao operador ${assignedOperatorId}`);
+          console.log(`[${requestId}] Novo lead geral atribuído ao operador ${assignedOperatorId} (${operatorNamesMap[assignedOperatorId] || 'Nome não encontrado'})`);
         }
       }
       
