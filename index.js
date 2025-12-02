@@ -13,13 +13,21 @@ const CUSTOMER_ID = process.env.CUSTOMER_ID;
 const CHANNEL_ID = Number(process.env.CHANNEL_ID); // fallback
 
 // CONFIGURAÇÃO DE TEMPLATES (ROTAÇÃO ALEATÓRIA)
-const TEMPLATE_IDS_IN_HOURS = (process.env.TEMPLATE_IDS_IN_HOURS || "").split(",").filter(Boolean);
+// CORREÇÃO: Lendo TEMPLATE_ID_IN_HOURS (singular) e limpando espaços
+const TEMPLATE_IDS_IN_HOURS = (process.env.TEMPLATE_ID_IN_HOURS || "")
+  .split(",")
+  .map(s => s.trim()) // Remove espaços em branco (ex: " 509031" vira "509031")
+  .filter(Boolean);
+
 const OFF_HOURS_TEMPLATE_ID = process.env.OFF_HOURS_TEMPLATE_ID || null;
 
-// Fallback de segurança para template
+// Se não houver lista, usa o template antigo como fallback único (segurança)
 if (TEMPLATE_IDS_IN_HOURS.length === 0 && process.env.TEMPLATE_ID) {
     TEMPLATE_IDS_IN_HOURS.push(process.env.TEMPLATE_ID);
 }
+
+// Log para confirmar que a lista foi carregada corretamente
+console.log(">> LISTA DE TEMPLATES CARREGADA:", TEMPLATE_IDS_IN_HOURS);
 
 const OPERATOR_NAMES_MAP = process.env.OPERATOR_NAMES_MAP;
 
