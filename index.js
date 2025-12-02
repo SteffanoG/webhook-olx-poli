@@ -12,12 +12,11 @@ const POLI_API_TOKEN = process.env.POLI_API_TOKEN;
 const CUSTOMER_ID = process.env.CUSTOMER_ID;
 const CHANNEL_ID = Number(process.env.CHANNEL_ID); // fallback
 
-// CONFIGURAÇÃO DE TEMPLATES (ROTAÇÃO)
-// Lê a lista de templates do .env, separada por vírgulas
+// CONFIGURAÇÃO DE TEMPLATES (ROTAÇÃO ALEATÓRIA)
 const TEMPLATE_IDS_IN_HOURS = (process.env.TEMPLATE_IDS_IN_HOURS || "").split(",").filter(Boolean);
 const OFF_HOURS_TEMPLATE_ID = process.env.OFF_HOURS_TEMPLATE_ID || null;
 
-// Se não houver lista, usa o template antigo como fallback único (segurança)
+// Fallback de segurança para template
 if (TEMPLATE_IDS_IN_HOURS.length === 0 && process.env.TEMPLATE_ID) {
     TEMPLATE_IDS_IN_HOURS.push(process.env.TEMPLATE_ID);
 }
@@ -72,7 +71,6 @@ const fullTimeOperatorIds = operatorIds.filter(id => !allTimedIds.includes(id));
 // Contadores para filas (Round-Robin)
 let generalRoundRobinIndex = 0;
 let sorocabaRoundRobinIndex = 0;
-let templateRoundRobinIndex = 0; // Novo contador para templates
 
 // ========= LÓGICA DE VERIFICAÇÃO DE STATUS (API DE GESTÃO) =========
 async function getServiceAvailableOperatorIds() {
@@ -83,8 +81,7 @@ async function getServiceAvailableOperatorIds() {
         const response = await axios.get(url, { headers: API_HEADERS_JSON });
 
         console.log("[DIAGNÓSTICO] Resposta da API de Gestão (/user/company):");
-        // console.log(JSON.stringify(response.data, null, 2)); // Comentado para poluir menos o log
-
+        
         if (response.data && Array.isArray(response.data.data)) {
             for (const user of response.data.data) {
                 if (user.available_service === 1) {
@@ -280,18 +277,12 @@ function selectTemplateForNow() {
       break;
   }
 
-  // Lógica de Rotação de Template
+  // Lógica de Rotação de Template (ALEATÓRIA)
   let chosenTemplate;
   if (dentroHorario) {
       if (TEMPLATE_IDS_IN_HOURS.length > 0) {
-          const tIndex = templateRoundRobinIndex % TEMPLATE_IDS_IN_HOURS.length;
+          const tIndex = Math.floor(Math.random() * TEMPLATE_IDS_IN_HOURS.length);
           chosenTemplate = TEMPLATE_IDS_IN_HOURS[tIndex];
-          // Só incrementamos o contador se realmente formos usar (feita a lógica no envio)
-          // Mas para simplificar, incrementamos aqui e retornamos o escolhido.
-          // OBS: O incremento real idealmente ficaria no momento do envio para não pular em erros,
-          // mas para manter simples a função select, vamos deixar a decisão lá embaixo
-          // ou retornar o index para incrementar depois. 
-          // Vamos retornar o template já escolhido.
       } else {
           chosenTemplate = null; // Fallback
       }
@@ -355,12 +346,8 @@ app.post("/", async (req, res) => {
 
   const { fmtStr, dow } = (() => { const n = nowInTimezone(TIMEZONE); return { fmtStr: n.fmtStr, dow: n.dow }; })();
   
-  // Seleção do Template com Rotação
+  // Seleção do Template com Rotação Aleatória
   const sel = selectTemplateForNow();
-  // Se estiver no horário e tivermos templates na lista, incrementamos o contador global
-  if (sel.dentroHorario && TEMPLATE_IDS_IN_HOURS.length > 0) {
-      templateRoundRobinIndex++;
-  }
 
   console.log(`[${requestId}] Lead:`, JSON.stringify({ name, email: leadEmail, phone: maskPhone(phoneDigits), listing: propertyCode, originLeadId }));
   console.log(`[${requestId}] Agora: ${fmtStr} | DOW=${dow} (0=Dom..6=Sáb) | dentroHorario=${sel.dentroHorario} | template=${sel.chosenTemplate}`);
@@ -448,7 +435,9 @@ app.post("/", async (req, res) => {
     }
     
     const audit = await sendTemplateMessage(contactId, assignedOperatorId, desiredName, operatorName, channelForSend, templateToSend, requestId);
-    console.log(`[${requestId}] Template enviado com sucesso.`, JSON.stringify(audit));
+    
+    // LOG MELHORADO: Mostra ID do Template e Nome do Operador
+    console.log(`[${requestId}] ✅ Template [${templateToSend}] enviado com sucesso para ${operatorName} (ID: ${assignedOperatorId}). Response:`, JSON.stringify(audit));
 
     recentSends.set(sendKey, { ts: Date.now() });
     recentLeads.set(idemKey, { ts: Date.now(), status: "done" });
