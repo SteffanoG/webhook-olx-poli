@@ -13,21 +13,17 @@ const CUSTOMER_ID = process.env.CUSTOMER_ID;
 const CHANNEL_ID = Number(process.env.CHANNEL_ID); // fallback
 
 // CONFIGURAÇÃO DE TEMPLATES (ROTAÇÃO ALEATÓRIA)
-// CORREÇÃO: Lendo TEMPLATE_ID_IN_HOURS (singular) e limpando espaços
 const TEMPLATE_IDS_IN_HOURS = (process.env.TEMPLATE_ID_IN_HOURS || "")
   .split(",")
-  .map(s => s.trim()) // Remove espaços em branco (ex: " 509031" vira "509031")
+  .map(s => s.trim())
   .filter(Boolean);
 
 const OFF_HOURS_TEMPLATE_ID = process.env.OFF_HOURS_TEMPLATE_ID || null;
 
-// Se não houver lista, usa o template antigo como fallback único (segurança)
+// Fallback de segurança para template
 if (TEMPLATE_IDS_IN_HOURS.length === 0 && process.env.TEMPLATE_ID) {
     TEMPLATE_IDS_IN_HOURS.push(process.env.TEMPLATE_ID);
 }
-
-// Log para confirmar que a lista foi carregada corretamente
-console.log(">> LISTA DE TEMPLATES CARREGADA:", TEMPLATE_IDS_IN_HOURS);
 
 const OPERATOR_NAMES_MAP = process.env.OPERATOR_NAMES_MAP;
 
@@ -55,6 +51,7 @@ const http = axios.create({
 });
 
 // ================== OPERADORES E ROTEAMENTO ==================
+// LISTA PRINCIPAL: Agora todos aqui são considerados disponíveis para a fila geral
 const operatorIds = (process.env.OPERATOR_IDS || "").replace(/\s/g, "").split(",").filter(Boolean);
 
 let operatorNamesMap = {};
@@ -67,14 +64,6 @@ try {
 // Lendo as regras de roteamento do ambiente
 const SOROCABA_PROPERTY_CODES = new Set((process.env.SOROCABA_PROPERTY_CODES || "").split(","));
 const SOROCABA_OPERATOR_IDS = (process.env.SOROCABA_OPERATOR_IDS || "").split(",").filter(Boolean);
-
-const timedOperators = {
-    '09_17': (process.env.OPERATORS_SHIFT_09_17 || "").split(",").filter(Boolean),
-    '12_18': (process.env.OPERATORS_SHIFT_12_18 || "").split(",").filter(Boolean)
-};
-
-const allTimedIds = [].concat(...Object.values(timedOperators));
-const fullTimeOperatorIds = operatorIds.filter(id => !allTimedIds.includes(id));
 
 // Contadores para filas (Round-Robin)
 let generalRoundRobinIndex = 0;
@@ -107,12 +96,9 @@ async function getServiceAvailableOperatorIds() {
     }
 }
 
-function getOperatorsByTime() {
-    const { hh } = nowInTimezone(TIMEZONE);
-    let scheduledOperators = [...fullTimeOperatorIds];
-    if (hh >= 9 && hh < 17) scheduledOperators.push(...timedOperators['09_17']);
-    if (hh >= 12 && hh < 18) scheduledOperators.push(...timedOperators['12_18']);
-    return [...new Set(scheduledOperators)];
+// SIMPLIFICADO: Retorna todos os operadores da lista principal
+function getAllOperators() {
+    return [...operatorIds].sort();
 }
 
 // ================== UTILS ==================
@@ -389,7 +375,7 @@ app.post("/", async (req, res) => {
     let assignedOperatorId = contactDetails.user_id || contactDetails.userId || null;
     if (!assignedOperatorId) {
       const isSorocabaLead = SOROCABA_PROPERTY_CODES.has(String(propertyCode));
-      const operatorsInShift = getOperatorsByTime();
+      const allOperators = getAllOperators();
       const serviceAvailableOperators = await getServiceAvailableOperatorIds();
 
       if (isSorocabaLead) {
@@ -400,21 +386,18 @@ app.post("/", async (req, res) => {
         console.log(`[${requestId}] Novo lead de Sorocaba atribuído ao operador ${assignedOperatorId} (${operatorNamesMap[assignedOperatorId] || 'Nome não encontrado'})`);
 
       } else {
-        const trulyAvailableOperators = operatorsInShift.filter(id => serviceAvailableOperators.has(id)).sort();
-        console.log(`[${requestId}] Operadores no horário: [${operatorsInShift.join(', ')}]`);
+        // LÓGICA SIMPLIFICADA: Verifica quem está 'Disponível' na API
+        const trulyAvailableOperators = allOperators.filter(id => serviceAvailableOperators.has(id)).sort();
+        console.log(`[${requestId}] Todos os Operadores (Lista Geral): [${allOperators.join(', ')}]`);
         console.log(`[${requestId}] Operadores com status 'Disponível': [${Array.from(serviceAvailableOperators).join(', ')}]`);
-        console.log(`[${requestId}] Operadores verdadeiramente disponíveis: [${trulyAvailableOperators.join(', ')}]`);
         
         let operatorsToChooseFrom;
 
         if (trulyAvailableOperators.length > 0) {
             operatorsToChooseFrom = trulyAvailableOperators;
-        } else if (operatorsInShift.length > 0) {
-            console.warn(`[${requestId}] Nenhum operador 'Disponível'. Usando fallback para operadores no horário.`);
-            operatorsToChooseFrom = operatorsInShift.sort();
         } else {
-            console.warn(`[${requestId}] Nenhum operador no horário. Usando fallback para TODOS os operadores.`);
-            operatorsToChooseFrom = operatorIds.sort();
+            console.warn(`[${requestId}] Nenhum operador 'Disponível'. Usando fallback para TODOS os operadores.`);
+            operatorsToChooseFrom = allOperators;
         }
 
         if (operatorsToChooseFrom.length > 0) {
@@ -444,7 +427,6 @@ app.post("/", async (req, res) => {
     
     const audit = await sendTemplateMessage(contactId, assignedOperatorId, desiredName, operatorName, channelForSend, templateToSend, requestId);
     
-    // LOG MELHORADO: Mostra ID do Template e Nome do Operador
     console.log(`[${requestId}] ✅ Template [${templateToSend}] enviado com sucesso para ${operatorName} (ID: ${assignedOperatorId}). Response:`, JSON.stringify(audit));
 
     recentSends.set(sendKey, { ts: Date.now() });
