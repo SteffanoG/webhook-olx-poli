@@ -7,12 +7,22 @@ dotenv.config();
 const app = express();
 app.use(express.json());
 
-// ================== CONFIG ==================
-const POLI_API_TOKEN = process.env.POLI_API_TOKEN;
-const CUSTOMER_ID = process.env.CUSTOMER_ID;
-const CHANNEL_ID = Number(process.env.CHANNEL_ID); // fallback
+// ================== CONFIGURAÇÃO DE TOKENS ==================
+// Token para operações (Criar contato, enviar mensagem) -> API CLIENTE
+const POLI_CLIENT_TOKEN = process.env.POLI_CLIENT_TOKEN;
 
-// CONFIGURAÇÃO DE TEMPLATES (ROTAÇÃO ALEATÓRIA)
+// Token para consulta de status -> API REVENDEDOR
+const POLI_RESELLER_TOKEN = process.env.POLI_RESELLER_TOKEN;
+
+const CUSTOMER_ID = process.env.CUSTOMER_ID;
+const CHANNEL_ID = Number(process.env.CHANNEL_ID); 
+
+// Validação crítica de tokens
+if (!POLI_CLIENT_TOKEN || !POLI_RESELLER_TOKEN) {
+    console.error("❌ ERRO CRÍTICO: Faltam tokens no .env (POLI_CLIENT_TOKEN ou POLI_RESELLER_TOKEN)");
+}
+
+// ================== CONFIGURAÇÃO DE TEMPLATES (ROTAÇÃO ALEATÓRIA) ==================
 const TEMPLATE_IDS_IN_HOURS = (process.env.TEMPLATE_ID_IN_HOURS || "")
   .split(",")
   .map(s => s.trim())
@@ -26,10 +36,11 @@ if (TEMPLATE_IDS_IN_HOURS.length === 0 && process.env.TEMPLATE_ID) {
 
 const OPERATOR_NAMES_MAP = process.env.OPERATOR_NAMES_MAP;
 
-const BASE_URL = "https://app.polichat.com.br/api/v1"; // API OPERACIONAL
+// URL BASE para operações (Cliente)
+const BASE_URL = "https://app.polichat.com.br/api/v1"; 
 const AXIOS_TIMEOUT_MS = Number(process.env.AXIOS_TIMEOUT_MS || 10000);
-const IDEMPOTENCY_TTL_MS = Number(process.env.IDEMPOTENCY_TTL_MS || 10 * 60 * 1000); // 10min
-const SEND_COOLDOWN_MS = Number(process.env.SEND_COOLDOWN_MS || 30 * 60 * 1000);     // 30min
+const IDEMPOTENCY_TTL_MS = Number(process.env.IDEMPOTENCY_TTL_MS || 10 * 60 * 1000); 
+const SEND_COOLDOWN_MS = Number(process.env.SEND_COOLDOWN_MS || 30 * 60 * 1000);     
 const MAX_RETRIES = Number(process.env.MAX_RETRIES || 3);
 
 const START_HOUR = Number(process.env.START_HOUR || 9);
@@ -37,16 +48,18 @@ const END_HOUR   = Number(process.env.END_HOUR   || 20);
 const TIMEZONE   = process.env.TIMEZONE || "America/Sao_Paulo";
 const FORCE_CHANNEL_ID = String(process.env.FORCE_CHANNEL_ID || "false").toLowerCase() === "true";
 
-const API_HEADERS_JSON = {
-  Authorization: `Bearer ${POLI_API_TOKEN}`,
+// Headers para API de Cliente (Operacional)
+const CLIENT_HEADERS = {
+  Authorization: `Bearer ${POLI_CLIENT_TOKEN}`,
   Accept: "application/json",
   "Content-Type": "application/json",
 };
 
-const http = axios.create({
+// Instância Axios para API de Cliente
+const httpClient = axios.create({
   baseURL: BASE_URL,
   timeout: AXIOS_TIMEOUT_MS,
-  headers: { Authorization: `Bearer ${POLI_API_TOKEN}`, Accept: "application/json" },
+  headers: CLIENT_HEADERS,
 });
 
 // ================== OPERADORES E ROTEAMENTO ==================
@@ -63,27 +76,30 @@ try {
 const SOROCABA_PROPERTY_CODES = new Set((process.env.SOROCABA_PROPERTY_CODES || "").split(","));
 const SOROCABA_OPERATOR_IDS = (process.env.SOROCABA_OPERATOR_IDS || "").split(",").filter(Boolean);
 
-// Removemos a distinção de turnos, todos na lista principal são considerados
-// const timedOperators = { ... }; // Removido
-// const allTimedIds = ...; // Removido
-// const fullTimeOperatorIds = ...; // Removido
-
 let generalRoundRobinIndex = 0;
 let sorocabaRoundRobinIndex = 0;
 
-// ========= LÓGICA DE VERIFICAÇÃO DE STATUS (API DE GESTÃO) =========
+// ========= LÓGICA DE VERIFICAÇÃO DE STATUS (API DE GESTÃO - REVENDEDOR) =========
 async function getServiceAvailableOperatorIds() {
     const url = `https://labrev.polichat.com.br/user/company/${CUSTOMER_ID}`;
     const availableIds = new Set();
     
+    // Headers específicos para a API de Revendedor
+    const resellerHeaders = {
+        Authorization: `Bearer ${POLI_RESELLER_TOKEN}`,
+        Accept: "application/json",
+        "Content-Type": "application/json"
+    };
+    
     try {
-        const response = await axios.get(url, { headers: API_HEADERS_JSON });
+        // Usa uma chamada direta do axios com o token de revendedor
+        const response = await axios.get(url, { headers: resellerHeaders, timeout: AXIOS_TIMEOUT_MS });
 
         console.log("[DIAGNÓSTICO] Resposta da API de Gestão (/user/company) SUCESSO.");
         
         if (response.data && Array.isArray(response.data.data)) {
             for (const user of response.data.data) {
-                // CORREÇÃO: Usando 'avaliable_service' conforme retorno da API
+                // Campo 'avaliable_service' conforme retorno da API
                 if (user.avaliable_service === 1) {
                     availableIds.add(String(user.id));
                 }
@@ -91,16 +107,14 @@ async function getServiceAvailableOperatorIds() {
         }
         return availableIds;
     } catch (error) {
-        console.error("Falha ao buscar status 'avaliable_service' dos operadores:", error.message);
+        console.error("Falha ao buscar status na API de Revendedor:", error.message);
         if (error.response) {
-            console.error("Resposta do erro da API de Gestão:", JSON.stringify(error.response.data));
+            console.error("Erro detalhado API Revendedor:", JSON.stringify(error.response.data));
         }
         return availableIds;
     }
 }
 
-// Retorna todos os operadores da lista principal (sem filtro de horário rígido aqui,
-// o filtro real será feito pela disponibilidade 'avaliable_service')
 function getAllOperators() {
     return [...operatorIds].sort();
 }
@@ -130,7 +144,8 @@ async function postWithRetry(url, data, config, reqId, label) {
   while (attempt < MAX_RETRIES) {
     try {
       attempt++;
-      return await http.post(url, data, config);
+      // Usa o httpClient (configurado com Token de Cliente)
+      return await httpClient.post(url, data);
     } catch (err) {
       lastErr = err;
       const retry = isRetryable(err) && attempt < MAX_RETRIES;
@@ -154,7 +169,8 @@ async function putWithRetry(url, data, config, reqId, label) {
   while (attempt < MAX_RETRIES) {
     try {
       attempt++;
-      return await http.put(url, data, config);
+      // Usa o httpClient (configurado com Token de Cliente)
+      return await httpClient.put(url, data);
     } catch (err) {
       lastErr = err;
       const retry = isRetryable(err) && attempt < MAX_RETRIES;
@@ -380,6 +396,7 @@ app.post("/", async (req, res) => {
     if (!assignedOperatorId) {
       const isSorocabaLead = SOROCABA_PROPERTY_CODES.has(String(propertyCode));
       const allOperators = getAllOperators();
+      // Chama a função que usa o token de REVENDEDOR
       const serviceAvailableOperators = await getServiceAvailableOperatorIds();
 
       if (isSorocabaLead) {
@@ -388,12 +405,9 @@ app.post("/", async (req, res) => {
         const availableSorocabaOperators = SOROCABA_OPERATOR_IDS.filter(id => serviceAvailableOperators.has(id));
         
         let operatorsToChooseFrom;
-        // Se alguma das duas estiver disponível, usa a lista filtrada. Se não, usa as duas (fallback de horário/geral)
         if (availableSorocabaOperators.length > 0) {
              operatorsToChooseFrom = availableSorocabaOperators;
         } else {
-             // Fallback: Tenta distribuir mesmo que o status não seja 'disponível', para não perder o lead
-             // Ou se a API de status falhar
              operatorsToChooseFrom = SOROCABA_OPERATOR_IDS;
         }
 
@@ -403,7 +417,7 @@ app.post("/", async (req, res) => {
         console.log(`[${requestId}] Novo lead de Sorocaba atribuído ao operador ${assignedOperatorId} (${operatorNamesMap[assignedOperatorId] || 'Nome não encontrado'})`);
 
       } else {
-        // LÓGICA GERAL: Verifica quem está 'Disponível' na API
+        // LÓGICA GERAL
         const trulyAvailableOperators = allOperators.filter(id => serviceAvailableOperators.has(id)).sort();
         console.log(`[${requestId}] Todos os Operadores (Lista Geral): [${allOperators.join(', ')}]`);
         console.log(`[${requestId}] Operadores com status 'Disponível' (API): [${Array.from(serviceAvailableOperators).join(', ')}]`);
@@ -470,7 +484,11 @@ async function ensureContactExists(name, phoneDigits, reqId, extras = {}) {
   try {
     const resp = await postWithRetry(
       url, form,
-      { headers: { Authorization: `Bearer ${POLI_API_TOKEN}`, "Content-Type": "application/x-www-form-urlencoded", Accept: "application/json" } },
+      // API CLIENTE não precisa mudar, mas vamos garantir o header certo se usarmos axios direto
+      // Aqui usamos o httpClient criado lá em cima, que já tem o token certo
+      // ATENÇÃO: a função postWithRetry original usava http.post. 
+      // Ajustei a função postWithRetry abaixo para usar httpClient
+      {}, // config vazio pois httpClient já tem headers
       reqId, "create_contact"
     );
     const id = resp?.data?.data?.id ?? resp?.data?.id ?? resp?.data?.contact?.id ?? null;
@@ -488,7 +506,8 @@ async function ensureContactExists(name, phoneDigits, reqId, extras = {}) {
 
 async function getContactDetails(contactId, reqId) {
   const url = `/customers/${CUSTOMER_ID}/contacts/${contactId}`;
-  const response = await http.get(url, { headers: API_HEADERS_JSON });
+  // Usa httpClient (Token Cliente)
+  const response = await httpClient.get(url);
   return response?.data?.data ?? response?.data ?? null;
 }
 
@@ -496,20 +515,23 @@ async function updateContactFields(contactId, fields = {}, reqId) {
   if (!fields || !Object.keys(fields).length) return;
   const url = `/customers/${CUSTOMER_ID}/contacts/${contactId}`;
   try {
-    await putWithRetry(url, fields, { headers: API_HEADERS_JSON }, reqId, "update_contact_json");
+    // Usa httpClient (Token Cliente)
+    await putWithRetry(url, fields, {}, reqId, "update_contact_json");
   } catch (err) {
     const form = new URLSearchParams();
     for (const [k, v] of Object.entries(fields)) {
       if (v !== undefined && v !== null) form.append(k, String(v));
     }
-    await putWithRetry(url, form, { headers: { Authorization: `Bearer ${POLI_API_TOKEN}`, "Content-Type": "application/x-www-form-urlencoded", Accept: "application/json" } }, reqId, "update_contact_form");
+    // Usa httpClient (Token Cliente) - ajustado no putWithRetry
+    await putWithRetry(url, form, {}, reqId, "update_contact_form");
   }
 }
 
 async function assignContactToOperator(contactId, operatorId, reqId) {
   const url = `/customers/${CUSTOMER_ID}/contacts/redirect/contacts/${contactId}`;
   const payload = { user_id: operatorId };
-  await postWithRetry(url, payload, { headers: API_HEADERS_JSON }, reqId, "redirect");
+  // Usa httpClient (Token Cliente)
+  await postWithRetry(url, payload, {}, reqId, "redirect");
 }
 
 async function sendTemplateMessage(
@@ -527,10 +549,12 @@ async function sendTemplateMessage(
   const form = new URLSearchParams();
   form.append("quick_message_id", templateIdToUse);
   form.append("parameters", params);
+
+  // Usa httpClient (Token Cliente)
   const resp = await postWithRetry(
     url,
     form,
-    { headers: { Authorization: `Bearer ${POLI_API_TOKEN}`, "Content-Type": "application/x-www-form-urlencoded", Accept: "application/json" } },
+    {}, // headers já estão no client
     reqId, "send_template"
   );
   const body = resp?.data || {};
