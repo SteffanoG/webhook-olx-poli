@@ -7,17 +7,12 @@ dotenv.config();
 const app = express();
 app.use(express.json());
 
-// ================== CONFIGURAÇÃO DE AMBIENTE ==================
-const POLI_CLIENT_TOKEN = process.env.POLI_CLIENT_TOKEN;
-const POLI_RESELLER_TOKEN = process.env.POLI_RESELLER_TOKEN;
-const CUSTOMER_ID = process.env.CUSTOMER_ID;
-const CHANNEL_ID = Number(process.env.CHANNEL_ID); 
+// ================== HEALTH CHECK (PRIORIDADE MÁXIMA) ==================
+// Isso garante que o Railway veja o servidor online imediatamente
+app.get("/", (req, res) => res.status(200).send("Online 🚀"));
 
-if (!POLI_CLIENT_TOKEN || !POLI_RESELLER_TOKEN) {
-    console.error("❌ ERRO CRÍTICO: Faltam tokens no .env");
-}
-
-// ================== CONSTANTES GLOBAIS ==================
+// ================== CONSTANTES GLOBAIS (DEFINIÇÃO) ==================
+// Definidas no topo para evitar ReferenceError
 const START_HOUR = Number(process.env.START_HOUR || 9);
 const END_HOUR   = Number(process.env.END_HOUR   || 20);
 const TIMEZONE   = process.env.TIMEZONE || "America/Sao_Paulo";
@@ -29,6 +24,16 @@ const SEND_COOLDOWN_MS = Number(process.env.SEND_COOLDOWN_MS || 1800000);
 const MAX_RETRIES = 3;
 const FORCE_CHANNEL_ID = String(process.env.FORCE_CHANNEL_ID || "false").toLowerCase() === "true";
 
+// ================== CONFIGURAÇÃO DE AMBIENTE ==================
+const POLI_CLIENT_TOKEN = process.env.POLI_CLIENT_TOKEN;
+const POLI_RESELLER_TOKEN = process.env.POLI_RESELLER_TOKEN;
+const CUSTOMER_ID = process.env.CUSTOMER_ID;
+const CHANNEL_ID = Number(process.env.CHANNEL_ID); 
+
+if (!POLI_CLIENT_TOKEN || !POLI_RESELLER_TOKEN) {
+    console.error("⚠️ AVISO: Tokens de API não encontrados no .env (Verifique POLI_CLIENT_TOKEN e POLI_RESELLER_TOKEN).");
+}
+
 // ================== CONFIGURAÇÃO DE TEMPLATES ==================
 const TEMPLATE_IDS_IN_HOURS = (process.env.TEMPLATE_ID_IN_HOURS || "")
   .split(",").map(s => s.trim()).filter(Boolean);
@@ -39,15 +44,15 @@ if (TEMPLATE_IDS_IN_HOURS.length === 0 && process.env.TEMPLATE_ID) {
     TEMPLATE_IDS_IN_HOURS.push(process.env.TEMPLATE_ID);
 }
 
-// CORREÇÃO AQUI: Garantindo que operatorNamesMap seja global e seguro
+// Tratamento seguro do Mapa de Nomes
 let operatorNamesMap = {};
 try {
     operatorNamesMap = JSON.parse(process.env.OPERATOR_NAMES_MAP || "{}");
 } catch (e) {
-    console.error("❌ Erro ao ler OPERATOR_NAMES_MAP. Verifique o JSON no .env");
+    console.error("❌ Erro ao ler OPERATOR_NAMES_MAP. Verifique o formato JSON.");
 }
 
-// ================== CLIENTE HTTP ==================
+// ================== CLIENTE HTTP (API OPERACIONAL) ==================
 const CLIENT_HEADERS = {
   Authorization: `Bearer ${POLI_CLIENT_TOKEN}`,
   Accept: "application/json",
@@ -184,7 +189,6 @@ function selectTemplateForNow() {
   const { hh, dow } = nowInTimezone(TIMEZONE);
   let dentroHorario = false;
 
-  // Regra de horário
   if (dow >= 1 && dow <= 5) {
       if (hh >= START_HOUR && hh < 20) dentroHorario = true;
   } else if (dow === 6) {
@@ -232,10 +236,7 @@ app.post("/", async (req, res) => {
   }
 
   const { name, email, phoneDigits, propertyCode } = normalizeLeadPayload(req.body);
-  
-  // LOG DE DIAGNÓSTICO: Mostra o que foi rejeitado
   if (!name || !phoneDigits || !propertyCode) {
-    console.warn(`[${requestId}] ⚠️ Dados insuficientes. Rejeitado. Payload parcial: Nome=${name}, Fone=${maskPhone(phoneDigits)}, Cod=${propertyCode}`);
     return res.status(400).json({ error: "Dados incompletos." });
   }
   
@@ -247,13 +248,12 @@ app.post("/", async (req, res) => {
 
   const idemKey = `${phoneDigits}:${propertyCode}`;
   if (recentLeads.has(idemKey)) {
-      console.log(`[${requestId}] ♻️ Lead duplicado (ignorado).`);
-      return res.status(200).json({ status: "Duplicado recente." });
+      return res.status(200).json({ status: "Duplicado recente ignorado." });
   }
   recentLeads.set(idemKey, { ts: Date.now() });
 
   try {
-    // 1. CRIAR CONTATO (Form Data)
+    // 1. CRIAR CONTATO (Form Data OBRIGATÓRIO)
     const contactId = await ensureContactExists(name, phoneDigits, requestId, { email, propertyCode });
     
     // 2. BUSCAR DETALHES
@@ -316,8 +316,8 @@ app.post("/", async (req, res) => {
     }
 
     await sendTemplateMessage(contactId, assignedOperatorId, name, operatorName, channelToSend, sel.chosenTemplate, requestId);
+    console.log(`[${requestId}] 🚀 Mensagem enviada com sucesso!`);
     
-    console.log(`[${requestId}] 🚀 Mensagem enviada!`);
     recentSends.set(sendKey, { ts: Date.now() });
     return res.status(200).json({ status: "Sucesso" });
 
@@ -380,7 +380,7 @@ async function sendTemplateMessage(contactId, userId, contactName, opName, chann
     return res.data;
 }
 
-// ================== START ==================
+// ================== START SERVER ==================
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, "0.0.0.0", () => {
   console.log(`🚀 Servidor rodando na porta ${PORT}`);
