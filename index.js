@@ -7,96 +7,98 @@ dotenv.config();
 const app = express();
 app.use(express.json());
 
-// ================== CONFIGURAÇÃO DE TOKENS ==================
+// ================== VALIDAÇÃO DE AMBIENTE ==================
 const POLI_CLIENT_TOKEN = process.env.POLI_CLIENT_TOKEN;
 const POLI_RESELLER_TOKEN = process.env.POLI_RESELLER_TOKEN;
 const CUSTOMER_ID = process.env.CUSTOMER_ID;
-const CHANNEL_ID = Number(process.env.CHANNEL_ID); 
+const CHANNEL_ID = Number(process.env.CHANNEL_ID);
 
 if (!POLI_CLIENT_TOKEN || !POLI_RESELLER_TOKEN) {
-    console.error("❌ ERRO CRÍTICO: Faltam tokens no .env");
+    console.error("⚠️ AVISO: Tokens de API não encontrados no .env. O sistema pode falhar.");
 }
 
-// ================== CONFIGURAÇÃO DE TEMPLATES ==================
-const TEMPLATE_IDS_IN_HOURS = (process.env.TEMPLATE_ID_IN_HOURS || "")
-  .split(",").map(s => s.trim()).filter(Boolean);
-
+// ================== CONFIGURAÇÕES GERAIS ==================
+const BASE_URL = "https://app.polichat.com.br/api/v1";
+const AXIOS_TIMEOUT_MS = 10000;
+const IDEMPOTENCY_TTL_MS = 600000; // 10 minutos
+const SEND_COOLDOWN_MS = 1800000;  // 30 minutos
+const MAX_RETRIES = 3;
+const TIMEZONE = process.env.TIMEZONE || "America/Sao_Paulo";
+const NAME_NORMALIZE_ENABLED = true;
 const OFF_HOURS_TEMPLATE_ID = process.env.OFF_HOURS_TEMPLATE_ID || null;
+const FORCE_CHANNEL_ID = String(process.env.FORCE_CHANNEL_ID || "false").toLowerCase() === "true";
+
+// Templates (Rotação)
+const TEMPLATE_IDS_IN_HOURS = (process.env.TEMPLATE_ID_IN_HOURS || "")
+    .split(",")
+    .map(s => s.trim())
+    .filter(Boolean);
 
 if (TEMPLATE_IDS_IN_HOURS.length === 0 && process.env.TEMPLATE_ID) {
     TEMPLATE_IDS_IN_HOURS.push(process.env.TEMPLATE_ID);
 }
 
-const OPERATOR_NAMES_MAP = process.env.OPERATOR_NAMES_MAP;
-
-// URL BASE
-const BASE_URL = "https://app.polichat.com.br/api/v1"; 
-const AXIOS_TIMEOUT_MS = Number(process.env.AXIOS_TIMEOUT_MS || 10000);
-const IDEMPOTENCY_TTL_MS = Number(process.env.IDEMPOTENCY_TTL_MS || 10 * 60 * 1000); 
-const SEND_COOLDOWN_MS = Number(process.env.SEND_COOLDOWN_MS || 30 * 60 * 1000);     
-const MAX_RETRIES = Number(process.env.MAX_RETRIES || 3);
-
-const START_HOUR = Number(process.env.START_HOUR || 9);
-const END_HOUR   = Number(process.env.END_HOUR   || 20);
-const TIMEZONE   = process.env.TIMEZONE || "America/Sao_Paulo";
-const FORCE_CHANNEL_ID = String(process.env.FORCE_CHANNEL_ID || "false").toLowerCase() === "true";
-
-// Headers Padrão (JSON)
-const CLIENT_HEADERS = {
-  Authorization: `Bearer ${POLI_CLIENT_TOKEN}`,
-  Accept: "application/json",
-  "Content-Type": "application/json",
-};
-
-const httpClient = axios.create({
-  baseURL: BASE_URL,
-  timeout: AXIOS_TIMEOUT_MS,
-  headers: CLIENT_HEADERS,
-});
-
-// ================== OPERADORES E ROTEAMENTO ==================
-const operatorIds = (process.env.OPERATOR_IDS || "").replace(/\s/g, "").split(",").filter(Boolean);
+// Operadores
+const operatorIds = (process.env.OPERATOR_IDS || "")
+    .replace(/\s/g, "")
+    .split(",")
+    .filter(Boolean);
 
 let operatorNamesMap = {};
 try {
-  operatorNamesMap = JSON.parse(OPERATOR_NAMES_MAP || "{}");
+    operatorNamesMap = JSON.parse(process.env.OPERATOR_NAMES_MAP || "{}");
 } catch (e) {
-  console.error("ERRO CRÍTICO: Formato inválido em OPERATOR_NAMES_MAP.");
+    console.error("❌ Erro ao ler OPERATOR_NAMES_MAP. Verifique o formato JSON no .env");
 }
 
+// Regras de Sorocaba
 const SOROCABA_PROPERTY_CODES = new Set((process.env.SOROCABA_PROPERTY_CODES || "").split(","));
 const SOROCABA_OPERATOR_IDS = (process.env.SOROCABA_OPERATOR_IDS || "").split(",").filter(Boolean);
 
+// Contadores Round-Robin
 let generalRoundRobinIndex = 0;
 let sorocabaRoundRobinIndex = 0;
 
-// ========= LÓGICA DE STATUS (API REVENDEDOR) =========
+// ================== CLIENTE HTTP (API OPERACIONAL) ==================
+const httpClient = axios.create({
+    baseURL: BASE_URL,
+    timeout: AXIOS_TIMEOUT_MS,
+    headers: {
+        Authorization: `Bearer ${POLI_CLIENT_TOKEN}`,
+        Accept: "application/json",
+        "Content-Type": "application/json"
+    }
+});
+
+// ================== FUNÇÕES DE STATUS (API REVENDEDOR) ==================
 async function getServiceAvailableOperatorIds() {
     const url = `https://labrev.polichat.com.br/user/company/${CUSTOMER_ID}`;
     const availableIds = new Set();
-    
-    const resellerHeaders = {
-        Authorization: `Bearer ${POLI_RESELLER_TOKEN}`,
-        Accept: "application/json",
-        "Content-Type": "application/json"
-    };
-    
+
     try {
-        const response = await axios.get(url, { headers: resellerHeaders, timeout: AXIOS_TIMEOUT_MS });
-        console.log("[DIAGNÓSTICO] Resposta da API de Gestão (/user/company) SUCESSO.");
-        
+        const response = await axios.get(url, {
+            headers: {
+                Authorization: `Bearer ${POLI_RESELLER_TOKEN}`,
+                Accept: "application/json",
+                "Content-Type": "application/json"
+            },
+            timeout: AXIOS_TIMEOUT_MS
+        });
+
+        console.log("[DIAGNÓSTICO] Consulta de Status OK.");
+
         if (response.data && Array.isArray(response.data.data)) {
             for (const user of response.data.data) {
+                // A API retorna "avaliable_service" (com erro de digitação original deles)
                 if (user.avaliable_service === 1) {
                     availableIds.add(String(user.id));
                 }
             }
         }
-        return availableIds;
     } catch (error) {
-        console.error("Falha ao buscar status na API de Revendedor:", error.message);
-        return availableIds;
+        console.error("Falha ao buscar status (API Revendedor):", error.message);
     }
+    return availableIds;
 }
 
 function getAllOperators() {
@@ -107,366 +109,260 @@ function getAllOperators() {
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 function maskPhone(p) {
-  const s = String(p || "");
-  if (s.length <= 4) return s;
-  const head = s.slice(0, 4);
-  const tail = s.slice(-4);
-  return `${head}${"*".repeat(Math.max(0, s.length - 8))}${tail}`;
+    const s = String(p || "");
+    if (s.length <= 4) return s;
+    const head = s.slice(0, 4);
+    const tail = s.slice(-4);
+    return `${head}${"*".repeat(Math.max(0, s.length - 8))}${tail}`;
 }
 
-function isRetryable(err) {
-  const status = err?.response?.status;
-  if (status >= 500 && status <= 599) return true;
-  const code = err?.code;
-  return ["ECONNRESET", "ETIMEDOUT", "ENOTFOUND", "EAI_AGAIN", "ECONNABORTED"].includes(code);
-}
-
-// CORREÇÃO CRÍTICA AQUI: Passando 'config' para o httpClient
 async function postWithRetry(url, data, config, reqId, label) {
-  let attempt = 0;
-  let lastErr;
-  const delays = [250, 1000, 4000];
-  while (attempt < MAX_RETRIES) {
-    try {
-      attempt++;
-      // AQUI ESTAVA O ERRO: Faltava passar o 'config'
-      return await httpClient.post(url, data, config);
-    } catch (err) {
-      lastErr = err;
-      const retry = isRetryable(err) && attempt < MAX_RETRIES;
-      console.warn(
-        `[${reqId}] POST fail (${label}) attempt ${attempt}/${MAX_RETRIES}`,
-        "status:", err?.response?.status,
-        "code:", err?.code,
-        "retry:", retry
-      );
-      if (!retry) break;
-      await sleep(delays[attempt - 1] || 4000);
+    let attempt = 0;
+    while (attempt < MAX_RETRIES) {
+        try {
+            attempt++;
+            return await httpClient.post(url, data, config);
+        } catch (err) {
+            const status = err?.response?.status;
+            const isRetryable = (status >= 500 && status <= 599) || ["ECONNRESET", "ETIMEDOUT"].includes(err?.code);
+            console.warn(`[${reqId}] POST fail (${label}) ${attempt}/${MAX_RETRIES} status:${status}`);
+            if (!isRetryable || attempt >= MAX_RETRIES) throw err;
+            await sleep(1000);
+        }
     }
-  }
-  throw lastErr;
 }
 
-// CORREÇÃO CRÍTICA AQUI TAMBÉM
 async function putWithRetry(url, data, config, reqId, label) {
-  let attempt = 0;
-  let lastErr;
-  const delays = [250, 1000, 4000];
-  while (attempt < MAX_RETRIES) {
-    try {
-      attempt++;
-      // AQUI ESTAVA O ERRO: Faltava passar o 'config'
-      return await httpClient.put(url, data, config);
-    } catch (err) {
-      lastErr = err;
-      const retry = isRetryable(err) && attempt < MAX_RETRIES;
-      console.warn(
-        `[${reqId}] PUT fail (${label}) attempt ${attempt}/${MAX_RETRIES}`,
-        "status:", err?.response?.status,
-        "code:", err?.code,
-        "retry:", retry
-      );
-      if (!retry) break;
-      await sleep(delays[attempt - 1] || 4000);
+    let attempt = 0;
+    while (attempt < MAX_RETRIES) {
+        try {
+            attempt++;
+            return await httpClient.put(url, data, config);
+        } catch (err) {
+            const status = err?.response?.status;
+            const isRetryable = (status >= 500 && status <= 599) || ["ECONNRESET", "ETIMEDOUT"].includes(err?.code);
+            console.warn(`[${reqId}] PUT fail (${label}) ${attempt}/${MAX_RETRIES} status:${status}`);
+            if (!isRetryable || attempt >= MAX_RETRIES) throw err;
+            await sleep(1000);
+        }
     }
-  }
-  throw lastErr;
 }
 
-// ... (Funções de normalização de nome e data permanecem iguais)
-const NAME_NORMALIZE_ENABLED = String(process.env.NAME_NORMALIZE_ENABLED || "true").toLowerCase() !== "false";
-const NAME_NORMALIZE_EXCEPTIONS = (process.env.NAME_NORMALIZE_EXCEPTIONS || "da,de,do,das,dos,e").split(",").map(s => s.trim().toLowerCase()).filter(Boolean);
+function toTitleCasePtBr(raw) {
+    if (!raw || typeof raw !== "string") return raw;
+    const exceptions = ["da", "de", "do", "das", "dos", "e"];
+    return raw.trim().split(" ").map((w, i) => {
+        if (i > 0 && exceptions.includes(w.toLowerCase())) return w.toLowerCase();
+        return w.charAt(0).toUpperCase() + w.slice(1).toLowerCase();
+    }).join(" ");
+}
 
-function toTitleCasePtBr(raw = "") {
-  if (!raw || typeof raw !== "string") return raw;
-  const cleaned = raw.replace(/\s+/g, " ").trim();
-  if (!cleaned) return cleaned;
-  const words = cleaned.split(" ");
-  const result = words.map((w, idx) => {
-    const lower = w.toLowerCase();
-    if (idx > 0 && idx < words.length - 1 && NAME_NORMALIZE_EXCEPTIONS.includes(lower)) return lower;
-    if (w.includes("-")) return w.split("-").map(part => capitalizePart(part)).join("-");
-    return capitalizePart(w);
-  });
-  return result.join(" ");
-}
-function capitalizePart(part) {
-  if (!part) return part;
-  if (/^[A-Z]{2,4}$/.test(part)) return part;
-  if (part.includes("'")) return part.split("'").map(p => cap(p)).join("'");
-  return cap(part);
-}
-function cap(s) { const lower = s.toLowerCase(); return lower.charAt(0).toUpperCase() + lower.slice(1); }
-function needNameUpdate(current, desired) {
-  if (!current || !desired) return false;
-  if (current === desired) return false;
-  const norm = (t) => t.replace(/\s+/g, " ").trim();
-  const c = norm(current); const d = norm(desired);
-  const isAllCaps = c === c.toUpperCase(); const isAllLower = c === c.toLowerCase();
-  return isAllCaps || isAllLower || c !== d;
-}
 function nowInTimezone(tz) {
-  const d = new Date();
-  const fmt = new Intl.DateTimeFormat("pt-BR", { timeZone: tz, year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit" });
-  const hourFmt = new Intl.DateTimeFormat("en-US", { timeZone: tz, hour: "2-digit", hour12: false });
-  const dowFmt  = new Intl.DateTimeFormat("en-US", { timeZone: tz, weekday: "short" });
-  const partsHour = hourFmt.formatToParts(d);
-  const hh = Number(partsHour.find(p => p.type === "hour")?.value || "0");
-  const weekMap = { "Sun":0, "Mon":1, "Tue":2, "Wed":3, "Thu":4, "Fri":5, "Sat":6 };
-  const dow = weekMap[dowFmt.format(d)] ?? 0;
-  return { date: d, hh, dow, fmtStr: fmt.format(d) };
-}
-function selectTemplateForNow() {
-  const { hh, dow } = nowInTimezone(TIMEZONE);
-  let dentroHorario = false;
-  switch (dow) {
-    case 0: dentroHorario = false; break;
-    case 1: case 2: case 3: case 4: case 5: if (hh >= 9 && hh < 20) { dentroHorario = true; } break;
-    case 6: if (hh >= 9 && hh < 13) { dentroHorario = true; } break;
-  }
-  let chosenTemplate;
-  if (dentroHorario) {
-      if (TEMPLATE_IDS_IN_HOURS.length > 0) {
-          const tIndex = Math.floor(Math.random() * TEMPLATE_IDS_IN_HOURS.length);
-          chosenTemplate = TEMPLATE_IDS_IN_HOURS[tIndex];
-      } else { chosenTemplate = null; }
-  } else { chosenTemplate = OFF_HOURS_TEMPLATE_ID; }
-  return { dentroHorario, chosenTemplate };
-}
-function normalizeLeadPayload(body = {}) {
-  const rawName = body.name ?? body.leadName ?? null;
-  const email = body.email ?? null;
-  const rawPhone = body.phoneNumber ?? body.phone ?? null;
-  const phoneDigits = rawPhone ? String(rawPhone).replace(/\D/g, "") : null;
-  const propertyCode = body.clientListingId ?? body.listing ?? body.clientListingCode ?? body.cod ?? null;
-  const originLeadId = body.originLeadId ?? body.leadId ?? null;
-  const name = NAME_NORMALIZE_ENABLED && rawName ? toTitleCasePtBr(rawName) : rawName;
-  return { name, email, phoneDigits, propertyCode, originLeadId };
+    const d = new Date();
+    const hourFmt = new Intl.DateTimeFormat("en-US", { timeZone: tz, hour: "2-digit", hour12: false });
+    const dowFmt = new Intl.DateTimeFormat("en-US", { timeZone: tz, weekday: "short" });
+    const hh = Number(hourFmt.format(d));
+    const weekMap = { "Sun": 0, "Mon": 1, "Tue": 2, "Wed": 3, "Thu": 4, "Fri": 5, "Sat": 6 };
+    const dow = weekMap[dowFmt.format(d)] ?? 0;
+    return { hh, dow };
 }
 
+function selectTemplateForNow() {
+    const { hh, dow } = nowInTimezone(TIMEZONE);
+    let dentroHorario = false;
+
+    // Regra: Seg-Sex (09-20), Sab (09-13), Dom (Off)
+    if (dow >= 1 && dow <= 5 && hh >= START_HOUR && hh < 20) dentroHorario = true;
+    else if (dow === 6 && hh >= START_HOUR && hh < 13) dentroHorario = true;
+
+    let chosenTemplate = OFF_HOURS_TEMPLATE_ID;
+    if (dentroHorario && TEMPLATE_IDS_IN_HOURS.length > 0) {
+        const tIndex = Math.floor(Math.random() * TEMPLATE_IDS_IN_HOURS.length);
+        chosenTemplate = TEMPLATE_IDS_IN_HOURS[tIndex];
+    }
+    return { dentroHorario, chosenTemplate };
+}
+
+function normalizeLeadPayload(body = {}) {
+    const rawName = body.name || body.leadName;
+    const email = body.email;
+    const rawPhone = body.phoneNumber || body.phone;
+    const phoneDigits = rawPhone ? String(rawPhone).replace(/\D/g, "") : null;
+    const propertyCode = body.clientListingId || body.listing || body.cod;
+    const originLeadId = body.originLeadId || body.leadId;
+    const name = NAME_NORMALIZE_ENABLED && rawName ? toTitleCasePtBr(rawName) : rawName;
+    return { name, email, phoneDigits, propertyCode, originLeadId };
+}
+
+// ================== CACHE ==================
 const recentLeads = new Map();
 const recentSends = new Map();
 setInterval(() => {
-  const now = Date.now();
-  for (const [k, v] of recentLeads.entries()) { if (!v || !v.ts || now - v.ts > IDEMPOTENCY_TTL_MS) recentLeads.delete(k); }
-  for (const [k, v] of recentSends.entries()) { if (!v || !v.ts || now - v.ts > SEND_COOLDOWN_MS) recentSends.delete(k); }
-}, 60_000);
+    const now = Date.now();
+    for (const [k, v] of recentLeads.entries()) { if (now - v.ts > IDEMPOTENCY_TTL_MS) recentLeads.delete(k); }
+    for (const [k, v] of recentSends.entries()) { if (now - v.ts > SEND_COOLDOWN_MS) recentSends.delete(k); }
+}, 60000);
 
-// ================== WEBHOOK ==================
+// ================== ROTAS ==================
+app.get("/", (req, res) => res.sendStatus(200));
+
 app.post("/", async (req, res) => {
-  const requestId = randomUUID();
-  console.log(`[${requestId}] ✅ Webhook da OLX recebido!`);
+    const requestId = randomUUID();
+    console.log(`[${requestId}] ✅ Webhook recebido!`);
 
-  if (!operatorIds.length || !CUSTOMER_ID || !CHANNEL_ID || !Object.keys(operatorNamesMap).length) {
-    console.error(`[${requestId}] ❌ ERRO CRÍTICO: Variáveis de ambiente ausentes.`);
-    return res.status(500).json({ error: "Erro de configuração do servidor." });
-  }
+    const { name, email, phoneDigits, propertyCode, originLeadId } = normalizeLeadPayload(req.body);
 
-  const { name, email, phoneDigits, propertyCode, originLeadId } = normalizeLeadPayload(req.body);
-  if (!name || !phoneDigits || !propertyCode) {
-    return res.status(400).json({ error: "Dados essenciais do lead ausentes." });
-  }
-  
-  const leadEmail = email || "não informado";
-  const { fmtStr, dow } = (() => { const n = nowInTimezone(TIMEZONE); return { fmtStr: n.fmtStr, dow: n.dow }; })();
-  const sel = selectTemplateForNow();
-
-  console.log(`[${requestId}] Lead:`, JSON.stringify({ name, email: leadEmail, phone: maskPhone(phoneDigits), listing: propertyCode, originLeadId }));
-  console.log(`[${requestId}] Agora: ${fmtStr} | DOW=${dow} (0=Dom..6=Sáb) | dentroHorario=${sel.dentroHorario} | template=${sel.chosenTemplate}`);
-
-  const idemKey = `${phoneDigits}:${propertyCode}`;
-  const now = Date.now();
-  const seen = recentLeads.get(idemKey);
-  if (seen) {
-      if (seen.status === "done" && now - seen.ts < IDEMPOTENCY_TTL_MS) { return res.status(200).json({ status: "Lead ignorado (duplicado recente)." }); }
-      if (seen.status === "inflight") { return res.status(202).json({ status: "Lead em processamento." }); }
-  }
-  recentLeads.set(idemKey, { ts: now, status: "inflight" });
-
-  try {
-    const contactId = await ensureContactExists(name, phoneDigits, requestId, { email: leadEmail, propertyCode });
-    let contactDetails = await getContactDetails(contactId, requestId);
-
-    const desiredName = NAME_NORMALIZE_ENABLED ? toTitleCasePtBr(name) : name;
-    const needName = NAME_NORMALIZE_ENABLED && needNameUpdate(contactDetails?.name || "", desiredName);
-    const needCpf  = (contactDetails?.cpf || "") !== String(propertyCode).padStart(11, "0");
-    const needMail = !!leadEmail && (String(contactDetails?.email || "").toLowerCase() !== String(leadEmail).toLowerCase());
-
-    if (needName || needCpf || needMail) {
-      const fields = {};
-      if (needName) fields.name = desiredName;
-      if (needCpf)  fields.cpf  = String(propertyCode).padStart(11, "0");
-      if (needMail) fields.email = leadEmail;
-      await updateContactFields(contactId, fields, requestId);
+    if (!name || !phoneDigits || !propertyCode) {
+        return res.status(400).json({ error: "Dados incompletos." });
     }
 
-    let assignedOperatorId = contactDetails.user_id || contactDetails.userId || null;
-    if (!assignedOperatorId) {
-      const isSorocabaLead = SOROCABA_PROPERTY_CODES.has(String(propertyCode));
-      const allOperators = getAllOperators();
-      const serviceAvailableOperators = await getServiceAvailableOperatorIds();
+    const sel = selectTemplateForNow();
+    console.log(`[${requestId}] Lead: ${name} (${maskPhone(phoneDigits)}) - Imóvel: ${propertyCode}`);
+    console.log(`[${requestId}] Horário: ${sel.dentroHorario ? 'Dentro' : 'Fora'} - Template: ${sel.chosenTemplate}`);
 
-      if (isSorocabaLead) {
-        console.log(`[${requestId}] Lead de Sorocaba detectado. Roteando para a fila especial.`);
-        const availableSorocabaOperators = SOROCABA_OPERATOR_IDS.filter(id => serviceAvailableOperators.has(id));
-        let operatorsToChooseFrom;
-        if (availableSorocabaOperators.length > 0) {
-             operatorsToChooseFrom = availableSorocabaOperators;
-        } else {
-             operatorsToChooseFrom = SOROCABA_OPERATOR_IDS;
-        }
-        const operatorIndex = sorocabaRoundRobinIndex % operatorsToChooseFrom.length;
-        assignedOperatorId = Number(operatorsToChooseFrom[operatorIndex]);
-        sorocabaRoundRobinIndex++;
-        console.log(`[${requestId}] Novo lead de Sorocaba atribuído ao operador ${assignedOperatorId} (${operatorNamesMap[assignedOperatorId] || 'Nome não encontrado'})`);
+    const idemKey = `${phoneDigits}:${propertyCode}`;
+    if (recentLeads.has(idemKey)) {
+        return res.status(200).json({ status: "Duplicado recente ignorado." });
+    }
+    recentLeads.set(idemKey, { ts: Date.now() });
 
-      } else {
-        const trulyAvailableOperators = allOperators.filter(id => serviceAvailableOperators.has(id)).sort();
-        console.log(`[${requestId}] Todos os Operadores (Lista Geral): [${allOperators.join(', ')}]`);
-        console.log(`[${requestId}] Operadores com status 'Disponível' (API): [${Array.from(serviceAvailableOperators).join(', ')}]`);
+    try {
+        // 1. Garantir contato (Form Data para funcionar na API antiga)
+        const contactId = await ensureContactExists(name, phoneDigits, requestId, { email, propertyCode });
         
-        let operatorsToChooseFrom;
-        if (trulyAvailableOperators.length > 0) {
-            operatorsToChooseFrom = trulyAvailableOperators;
+        // 2. Buscar detalhes (para ver se já tem dono)
+        const contactDetails = await getContactDetails(contactId, requestId);
+        let assignedOperatorId = contactDetails?.user_id || contactDetails?.userId || null;
+
+        // 3. Atualizar dados se necessário
+        // (Lógica simplificada para focar na distribuição)
+        const needsUpdate = !contactDetails?.email && email;
+        if (needsUpdate) {
+             await updateContactFields(contactId, { email }, requestId);
+        }
+
+        // 4. Distribuir se não tiver dono
+        if (!assignedOperatorId) {
+            const isSorocaba = SOROCABA_PROPERTY_CODES.has(String(propertyCode));
+            const allOps = getAllOperators();
+            const onlineOps = await getServiceAvailableOperatorIds();
+
+            let targetList = [];
+            
+            if (isSorocaba) {
+                console.log(`[${requestId}] 🏠 Fila Sorocaba.`);
+                // Tenta achar alguém de Sorocaba online
+                targetList = SOROCABA_OPERATOR_IDS.filter(id => onlineOps.has(id));
+                if (targetList.length === 0) targetList = SOROCABA_OPERATOR_IDS; // Fallback
+                
+                const idx = sorocabaRoundRobinIndex % targetList.length;
+                assignedOperatorId = Number(targetList[idx]);
+                sorocabaRoundRobinIndex++;
+            } else {
+                console.log(`[${requestId}] 🏢 Fila Geral.`);
+                // Tenta achar alguém da lista geral online
+                targetList = allOps.filter(id => onlineOps.has(id));
+                
+                // Fallback: Se ninguém online, usa todos
+                if (targetList.length === 0) {
+                    console.warn(`[${requestId}] ⚠️ Ninguém 'Disponível'. Usando lista completa.`);
+                    targetList = allOps;
+                }
+
+                const idx = generalRoundRobinIndex % targetList.length;
+                assignedOperatorId = Number(targetList[idx]);
+                generalRoundRobinIndex++;
+            }
+
+            if (assignedOperatorId) {
+                console.log(`[${requestId}] 👉 Atribuindo para: ${operatorNamesMap[assignedOperatorId] || assignedOperatorId}`);
+                await assignContactToOperator(contactId, assignedOperatorId, requestId);
+            }
         } else {
-            console.warn(`[${requestId}] Nenhum operador 'Disponível' detectado. Usando fallback para TODOS os operadores.`);
-            operatorsToChooseFrom = allOperators;
+            console.log(`[${requestId}] 🔒 Contato já pertence a: ${operatorNamesMap[assignedOperatorId] || assignedOperatorId}`);
         }
 
-        if (operatorsToChooseFrom.length > 0) {
-          const operatorIndex = generalRoundRobinIndex % operatorsToChooseFrom.length;
-          assignedOperatorId = Number(operatorsToChooseFrom[operatorIndex]);
-          generalRoundRobinIndex++;
-          console.log(`[${requestId}] Novo lead geral atribuído ao operador ${assignedOperatorId} (${operatorNamesMap[assignedOperatorId] || 'Nome não encontrado'})`);
-        }
-      }
-      
-      if (assignedOperatorId) {
-        await assignContactToOperator(contactId, assignedOperatorId, requestId);
-      } else {
-        console.warn(`[${requestId}] Nenhum operador pôde ser atribuído para o lead ${contactId}.`);
-      }
+        // 5. Enviar Mensagem
+        const operatorName = operatorNamesMap[assignedOperatorId] || "Consultor";
+        // Usa o canal do contato se existir, senão o padrão
+        const channelToSend = (contactDetails?.externals?.[0]?.channel_id) || CHANNEL_ID;
+        
+        await sendTemplateMessage(contactId, assignedOperatorId, name, operatorName, channelToSend, sel.chosenTemplate, requestId);
+        
+        console.log(`[${requestId}] 🚀 Mensagem enviada com sucesso!`);
+        return res.status(200).json({ status: "Sucesso" });
+
+    } catch (error) {
+        console.error(`[${requestId}] ❌ Erro:`, error.response?.data || error.message);
+        // Não apagar do cache em caso de erro para evitar loops, a menos que seja crítico
+        return res.status(500).json({ error: "Erro interno" });
     }
-
-    const operatorName = operatorNamesMap[assignedOperatorId] || "um de nossos consultores";
-    const channelForSend = FORCE_CHANNEL_ID ? CHANNEL_ID : (contactDetails?.externals?.[0]?.channel_id ?? CHANNEL_ID);
-    const templateToSend = sel.chosenTemplate;
-
-    const sendKey = `${contactId}:${templateToSend}`;
-    if (recentSends.has(sendKey) && now - recentSends.get(sendKey).ts < SEND_COOLDOWN_MS) {
-      recentLeads.set(idemKey, { ts: Date.now(), status: "done" });
-      return res.status(200).json({ status: "Envio suprimido por cooldown de template." });
-    }
-    
-    const audit = await sendTemplateMessage(contactId, assignedOperatorId, desiredName, operatorName, channelForSend, templateToSend, requestId);
-    console.log(`[${requestId}] ✅ Template [${templateToSend}] enviado com sucesso para ${operatorName} (ID: ${assignedOperatorId}). Response:`, JSON.stringify(audit));
-
-    recentSends.set(sendKey, { ts: Date.now() });
-    recentLeads.set(idemKey, { ts: Date.now(), status: "done" });
-
-    return res.status(200).json({ status: "Lead recebido e processado com sucesso." });
-  } catch (error) {
-    recentLeads.delete(idemKey);
-    const errorMsg = error?.response?.data ? JSON.stringify(error.response.data) : error?.message || String(error);
-    console.error(`[${requestId}] ❌ Erro no fluxo:`, errorMsg);
-    return res.status(500).json({ status: "Erro interno ao processar o lead." });
-  }
 });
 
-// ================== FUNÇÃO CORRIGIDA PARA FORM DATA ==================
-async function ensureContactExists(name, phoneDigits, reqId, extras = {}) {
-  const url = `/customers/${CUSTOMER_ID}/contacts`;
-  
-  // Voltando para URLSearchParams para satisfazer a API de contatos
-  const form = new URLSearchParams();
-  form.append("name", name);
-  form.append("phone", phoneDigits);
-  if (extras?.email) form.append("email", extras.email);
-  if (extras?.propertyCode) form.append("cpf", String(extras.propertyCode).padStart(11, "0"));
+// ================== FUNÇÕES AUXILIARES DE API ==================
 
-  try {
-    const resp = await postWithRetry(
-      url, 
-      form, 
-      // IMPORTANTE: Sobrescreve o Content-Type padrão (JSON) para Form
-      { headers: { "Content-Type": "application/x-www-form-urlencoded" } }, 
-      reqId, 
-      "create_contact"
-    );
-    const id = resp?.data?.data?.id ?? resp?.data?.id ?? resp?.data?.contact?.id ?? null;
-    if (!id) throw new Error("Criação de contato sem ID na resposta.");
-    return id;
-  } catch (error) {
-    const maybeId = error?.response?.data?.contact?.id ?? error?.response?.data?.data?.id ?? error?.response?.data?.id ?? null;
-    if (maybeId) {
-        console.log(`[${reqId}] Contato já existente encontrado com ID: ${maybeId}`);
-        return maybeId;
-    }
-    throw error;
-  }
-}
-
-async function getContactDetails(contactId, reqId) {
-  const url = `/customers/${CUSTOMER_ID}/contacts/${contactId}`;
-  const response = await httpClient.get(url);
-  return response?.data?.data ?? response?.data ?? null;
-}
-
-async function updateContactFields(contactId, fields = {}, reqId) {
-  if (!fields || !Object.keys(fields).length) return;
-  const url = `/customers/${CUSTOMER_ID}/contacts/${contactId}`;
-  try {
-    await putWithRetry(url, fields, {}, reqId, "update_contact_json");
-  } catch (err) {
+// 1. Criar Contato (FORM DATA OBRIGATÓRIO)
+async function ensureContactExists(name, phone, reqId, extras) {
     const form = new URLSearchParams();
-    for (const [k, v] of Object.entries(fields)) {
-      if (v !== undefined && v !== null) form.append(k, String(v));
+    form.append("name", name);
+    form.append("phone", phone);
+    if (extras.email) form.append("email", extras.email);
+    if (extras.propertyCode) form.append("cpf", String(extras.propertyCode).padStart(11, "0"));
+
+    try {
+        // Importante: Sobrescreve o header para Form Data
+        const res = await postWithRetry(`/customers/${CUSTOMER_ID}/contacts`, form, {
+            headers: { "Content-Type": "application/x-www-form-urlencoded" }
+        }, reqId, "create_contact");
+        
+        return res.data?.data?.id || res.data?.id;
+    } catch (err) {
+        // Se já existe, tenta recuperar ID do erro
+        const existingId = err.response?.data?.contact?.id;
+        if (existingId) {
+            console.log(`[${reqId}] Contato já existe: ${existingId}`);
+            return existingId;
+        }
+        throw err;
     }
-    await putWithRetry(url, form, { headers: { "Content-Type": "application/x-www-form-urlencoded" } }, reqId, "update_contact_form");
-  }
 }
 
-async function assignContactToOperator(contactId, operatorId, reqId) {
-  const url = `/customers/${CUSTOMER_ID}/contacts/redirect/contacts/${contactId}`;
-  const payload = { user_id: operatorId };
-  await postWithRetry(url, payload, {}, reqId, "redirect");
+// 2. Detalhes (JSON)
+async function getContactDetails(id, reqId) {
+    const res = await httpClient.get(`/customers/${CUSTOMER_ID}/contacts/${id}`);
+    return res.data?.data || res.data;
 }
 
-// CORRIGIDA TAMBÉM: Garante envio como Form Data
-async function sendTemplateMessage(
-  contactId,
-  userId,
-  contactName,
-  operatorName,
-  channelId,
-  templateIdToUse,
-  reqId
-) {
-  const url = `/customers/${CUSTOMER_ID}/whatsapp/send_template/channels/${channelId}/contacts/${contactId}/users/${userId}`;
-  
-  const params = JSON.stringify([contactName, operatorName]);
-  const form = new URLSearchParams();
-  form.append("quick_message_id", templateIdToUse);
-  form.append("parameters", params);
-
-  const resp = await postWithRetry(
-    url,
-    form,
-    // Sobrescreve para Form Data
-    { headers: { "Content-Type": "application/x-www-form-urlencoded" } },
-    reqId, "send_template"
-  );
-  const body = resp?.data || {};
-  if (body?.success === false || body?.send === false) {
-    throw new Error(`Template aceito mas não enviado: ${JSON.stringify(body)}`);
-  }
-  return body;
+// 3. Atualizar (JSON)
+async function updateContactFields(id, fields, reqId) {
+    await putWithRetry(`/customers/${CUSTOMER_ID}/contacts/${id}`, fields, {}, reqId, "update");
 }
 
-process.on("uncaughtException", (err) => console.error("UNCAUGHT", err));
-process.on("unhandledRejection", (err) => console.error("UNHANDLED", err));
+// 4. Atribuir (JSON)
+async function assignContactToOperator(contactId, userId, reqId) {
+    await postWithRetry(`/customers/${CUSTOMER_ID}/contacts/redirect/contacts/${contactId}`, { user_id: userId }, {}, reqId, "assign");
+}
 
+// 5. Enviar Template (FORM DATA OBRIGATÓRIO)
+async function sendTemplateMessage(contactId, userId, contactName, opName, channelId, templateId, reqId) {
+    const params = JSON.stringify([contactName, opName]);
+    const form = new URLSearchParams();
+    form.append("quick_message_id", templateId);
+    form.append("parameters", params);
+
+    const res = await postWithRetry(
+        `/customers/${CUSTOMER_ID}/whatsapp/send_template/channels/${channelId}/contacts/${contactId}/users/${userId}`,
+        form,
+        { headers: { "Content-Type": "application/x-www-form-urlencoded" } },
+        reqId, "send_msg"
+    );
+    
+    if (res.data?.success === false) throw new Error("API retornou sucesso: false");
+    return res.data;
+}
+
+// ================== START SERVER ==================
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, "0.0.0.0", () => {
-  console.log(`🚀 Servidor rodando na porta ${PORT}`);
+    console.log(`🚀 Servidor rodando na porta ${PORT}`);
 });
