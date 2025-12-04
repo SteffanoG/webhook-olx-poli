@@ -20,7 +20,6 @@ const TEMPLATE_IDS_IN_HOURS = (process.env.TEMPLATE_ID_IN_HOURS || "")
 
 const OFF_HOURS_TEMPLATE_ID = process.env.OFF_HOURS_TEMPLATE_ID || null;
 
-// Fallback de segurança para template
 if (TEMPLATE_IDS_IN_HOURS.length === 0 && process.env.TEMPLATE_ID) {
     TEMPLATE_IDS_IN_HOURS.push(process.env.TEMPLATE_ID);
 }
@@ -51,7 +50,6 @@ const http = axios.create({
 });
 
 // ================== OPERADORES E ROTEAMENTO ==================
-// LISTA PRINCIPAL: Agora todos aqui são considerados disponíveis para a fila geral
 const operatorIds = (process.env.OPERATOR_IDS || "").replace(/\s/g, "").split(",").filter(Boolean);
 
 let operatorNamesMap = {};
@@ -65,7 +63,11 @@ try {
 const SOROCABA_PROPERTY_CODES = new Set((process.env.SOROCABA_PROPERTY_CODES || "").split(","));
 const SOROCABA_OPERATOR_IDS = (process.env.SOROCABA_OPERATOR_IDS || "").split(",").filter(Boolean);
 
-// Contadores para filas (Round-Robin)
+// Removemos a distinção de turnos, todos na lista principal são considerados
+// const timedOperators = { ... }; // Removido
+// const allTimedIds = ...; // Removido
+// const fullTimeOperatorIds = ...; // Removido
+
 let generalRoundRobinIndex = 0;
 let sorocabaRoundRobinIndex = 0;
 
@@ -77,18 +79,19 @@ async function getServiceAvailableOperatorIds() {
     try {
         const response = await axios.get(url, { headers: API_HEADERS_JSON });
 
-        console.log("[DIAGNÓSTICO] Resposta da API de Gestão (/user/company):");
+        console.log("[DIAGNÓSTICO] Resposta da API de Gestão (/user/company) SUCESSO.");
         
         if (response.data && Array.isArray(response.data.data)) {
             for (const user of response.data.data) {
-                if (user.available_service === 1) {
+                // CORREÇÃO: Usando 'avaliable_service' conforme retorno da API
+                if (user.avaliable_service === 1) {
                     availableIds.add(String(user.id));
                 }
             }
         }
         return availableIds;
     } catch (error) {
-        console.error("Falha ao buscar status 'available_service' dos operadores:", error.message);
+        console.error("Falha ao buscar status 'avaliable_service' dos operadores:", error.message);
         if (error.response) {
             console.error("Resposta do erro da API de Gestão:", JSON.stringify(error.response.data));
         }
@@ -96,7 +99,8 @@ async function getServiceAvailableOperatorIds() {
     }
 }
 
-// SIMPLIFICADO: Retorna todos os operadores da lista principal
+// Retorna todos os operadores da lista principal (sem filtro de horário rígido aqui,
+// o filtro real será feito pela disponibilidade 'avaliable_service')
 function getAllOperators() {
     return [...operatorIds].sort();
 }
@@ -380,23 +384,36 @@ app.post("/", async (req, res) => {
 
       if (isSorocabaLead) {
         console.log(`[${requestId}] Lead de Sorocaba detectado. Roteando para a fila especial.`);
-        const operatorIndex = sorocabaRoundRobinIndex % SOROCABA_OPERATOR_IDS.length;
-        assignedOperatorId = Number(SOROCABA_OPERATOR_IDS[operatorIndex]);
+        // Filtra apenas Noeli e Ellen que estão disponíveis
+        const availableSorocabaOperators = SOROCABA_OPERATOR_IDS.filter(id => serviceAvailableOperators.has(id));
+        
+        let operatorsToChooseFrom;
+        // Se alguma das duas estiver disponível, usa a lista filtrada. Se não, usa as duas (fallback de horário/geral)
+        if (availableSorocabaOperators.length > 0) {
+             operatorsToChooseFrom = availableSorocabaOperators;
+        } else {
+             // Fallback: Tenta distribuir mesmo que o status não seja 'disponível', para não perder o lead
+             // Ou se a API de status falhar
+             operatorsToChooseFrom = SOROCABA_OPERATOR_IDS;
+        }
+
+        const operatorIndex = sorocabaRoundRobinIndex % operatorsToChooseFrom.length;
+        assignedOperatorId = Number(operatorsToChooseFrom[operatorIndex]);
         sorocabaRoundRobinIndex++;
         console.log(`[${requestId}] Novo lead de Sorocaba atribuído ao operador ${assignedOperatorId} (${operatorNamesMap[assignedOperatorId] || 'Nome não encontrado'})`);
 
       } else {
-        // LÓGICA SIMPLIFICADA: Verifica quem está 'Disponível' na API
+        // LÓGICA GERAL: Verifica quem está 'Disponível' na API
         const trulyAvailableOperators = allOperators.filter(id => serviceAvailableOperators.has(id)).sort();
         console.log(`[${requestId}] Todos os Operadores (Lista Geral): [${allOperators.join(', ')}]`);
-        console.log(`[${requestId}] Operadores com status 'Disponível': [${Array.from(serviceAvailableOperators).join(', ')}]`);
+        console.log(`[${requestId}] Operadores com status 'Disponível' (API): [${Array.from(serviceAvailableOperators).join(', ')}]`);
         
         let operatorsToChooseFrom;
 
         if (trulyAvailableOperators.length > 0) {
             operatorsToChooseFrom = trulyAvailableOperators;
         } else {
-            console.warn(`[${requestId}] Nenhum operador 'Disponível'. Usando fallback para TODOS os operadores.`);
+            console.warn(`[${requestId}] Nenhum operador 'Disponível' detectado. Usando fallback para TODOS os operadores.`);
             operatorsToChooseFrom = allOperators;
         }
 
