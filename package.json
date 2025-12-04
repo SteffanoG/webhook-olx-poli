@@ -1,20 +1,18 @@
 {
   "name": "webhook-olx-poli",
   "version": "1.0.0",
-  "description": "Webhook para integrar leads da OLX com a plataforma Poli Digital.",
+  "description": "Integração OLX - Poli",
   "main": "index.js",
   "type": "module",
   "scripts": {
-    "start": "pm2-runtime start index.js"
+    "start": "node index.js"
   },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
   "dependencies": {
-    "axios": "^1.11.0",
-    "dotenv": "^16.6.1",
-    "express": "^4.21.2",
-    "ioredis": "^5.7.0",
-    "pm2": "^5.4.1"
+    "axios": "^1.6.0",
+    "dotenv": "^16.3.0",
+    "express": "^4.18.2"
+  },
+  "engines": {
+    "node": ">=18.0.0"
   }
 }
