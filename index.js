@@ -17,13 +17,12 @@ if (!POLI_CLIENT_TOKEN || !POLI_RESELLER_TOKEN) {
     console.error("❌ ERRO CRÍTICO: Faltam tokens no .env");
 }
 
-// ================== CONSTANTES GLOBAIS ==================
-// IMPORTANTE: Definindo horário aqui para evitar ReferenceError
+// ================== CONSTANTES GLOBAIS (DEFINIÇÃO) ==================
 const START_HOUR = Number(process.env.START_HOUR || 9);
 const END_HOUR   = Number(process.env.END_HOUR   || 20);
 const TIMEZONE   = process.env.TIMEZONE || "America/Sao_Paulo";
 
-// Configurações de Rede
+// Configurações de Rede e Lógica
 const BASE_URL = "https://app.polichat.com.br/api/v1"; 
 const AXIOS_TIMEOUT_MS = Number(process.env.AXIOS_TIMEOUT_MS || 10000);
 const IDEMPOTENCY_TTL_MS = Number(process.env.IDEMPOTENCY_TTL_MS || 600000); 
@@ -110,13 +109,12 @@ function maskPhone(p) {
   return `${head}${"*".repeat(Math.max(0, s.length - 8))}${tail}`;
 }
 
-// Função de Retry para POST (Corrigida para aceitar config)
+// CORREÇÃO CRÍTICA: Aceitando e usando 'config' para sobrescrever headers
 async function postWithRetry(url, data, config, reqId, label) {
   let attempt = 0;
   while (attempt < MAX_RETRIES) {
     try {
       attempt++;
-      // Importante: passamos o 'config' aqui para permitir sobrescrever headers
       return await httpClient.post(url, data, config);
     } catch (err) {
       const status = err?.response?.status;
@@ -128,7 +126,7 @@ async function postWithRetry(url, data, config, reqId, label) {
   }
 }
 
-// Função de Retry para PUT (Corrigida para aceitar config)
+// CORREÇÃO CRÍTICA: Aceitando e usando 'config' para sobrescrever headers
 async function putWithRetry(url, data, config, reqId, label) {
   let attempt = 0;
   while (attempt < MAX_RETRIES) {
@@ -145,19 +143,18 @@ async function putWithRetry(url, data, config, reqId, label) {
   }
 }
 
-// ====== Nome - Normalização PT-BR ======
+// ====== Normalizações ======
 const NAME_NORMALIZE_ENABLED = String(process.env.NAME_NORMALIZE_ENABLED || "true").toLowerCase() !== "false";
 const NAME_NORMALIZE_EXCEPTIONS = (process.env.NAME_NORMALIZE_EXCEPTIONS || "da,de,do,das,dos,e").split(",").map(s => s.trim().toLowerCase()).filter(Boolean);
 
-function toTitleCasePtBr(raw = "") {
+function toTitleCasePtBr(raw) {
   if (!raw || typeof raw !== "string") return raw;
   const cleaned = raw.replace(/\s+/g, " ").trim();
   if (!cleaned) return cleaned;
-  const words = cleaned.split(" ");
-  return words.map((w, idx) => {
+  return cleaned.split(" ").map((w, i) => {
     const lower = w.toLowerCase();
-    if (idx > 0 && idx < words.length - 1 && NAME_NORMALIZE_EXCEPTIONS.includes(lower)) return lower;
-    if (w.includes("-")) return w.split("-").map(part => capitalizePart(part)).join("-");
+    if (i > 0 && NAME_NORMALIZE_EXCEPTIONS.includes(lower)) return lower;
+    if (w.includes("-")) return w.split("-").map(p => capitalizePart(p)).join("-");
     return capitalizePart(w);
   }).join(" ");
 }
@@ -169,30 +166,23 @@ function capitalizePart(part) {
   return cap(part);
 }
 function cap(s) { const lower = s.toLowerCase(); return lower.charAt(0).toUpperCase() + lower.slice(1); }
-function needNameUpdate(current, desired) {
-  if (!current || !desired) return false;
-  const norm = (t) => t.replace(/\s+/g, " ").trim();
-  const c = norm(current); const d = norm(desired);
-  return c !== d;
-}
+function needNameUpdate(c, d) { if (!c || !d) return false; return c !== d; }
 
-// ====== Horário comercial / seleção de template ======
 function nowInTimezone(tz) {
   const d = new Date();
-  const fmt = new Intl.DateTimeFormat("pt-BR", { timeZone: tz, year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit" });
   const hourFmt = new Intl.DateTimeFormat("en-US", { timeZone: tz, hour: "2-digit", hour12: false });
-  const dowFmt  = new Intl.DateTimeFormat("en-US", { timeZone: tz, weekday: "short" });
+  const dowFmt = new Intl.DateTimeFormat("en-US", { timeZone: tz, weekday: "short" });
   const hh = Number(hourFmt.format(d));
   const weekMap = { "Sun":0, "Mon":1, "Tue":2, "Wed":3, "Thu":4, "Fri":5, "Sat":6 };
   const dow = weekMap[dowFmt.format(d)] ?? 0;
-  return { date: d, hh, dow, fmtStr: fmt.format(d) };
+  return { date: d, hh, dow, fmtStr: new Intl.DateTimeFormat("pt-BR", { timeZone: tz, dateStyle: "short", timeStyle: "medium" }).format(d) };
 }
 
 function selectTemplateForNow() {
   const { hh, dow } = nowInTimezone(TIMEZONE);
   let dentroHorario = false;
 
-  // Regra de horário (usando a variável global START_HOUR)
+  // Regra de horário
   if (dow >= 1 && dow <= 5) {
       if (hh >= START_HOUR && hh < 20) dentroHorario = true;
   } else if (dow === 6) {
@@ -244,8 +234,7 @@ app.post("/", async (req, res) => {
     return res.status(400).json({ error: "Dados incompletos." });
   }
   
-  const leadEmail = email || "não informado";
-  const { fmtStr, dow } = (() => { const n = nowInTimezone(TIMEZONE); return { fmtStr: n.fmtStr, dow: n.dow }; })();
+  const { fmtStr } = nowInTimezone(TIMEZONE);
   const sel = selectTemplateForNow();
 
   console.log(`[${requestId}] Lead: ${name} (${maskPhone(phoneDigits)}) - Imóvel: ${propertyCode}`);
@@ -259,7 +248,7 @@ app.post("/", async (req, res) => {
 
   try {
     // 1. GARANTIR CONTATO (Form Data)
-    const contactId = await ensureContactExists(name, phoneDigits, requestId, { email: leadEmail, propertyCode });
+    const contactId = await ensureContactExists(name, phoneDigits, requestId, { email, propertyCode });
     
     // 2. BUSCAR DETALHES
     let contactDetails = await getContactDetails(contactId, requestId);
@@ -277,6 +266,7 @@ app.post("/", async (req, res) => {
       const onlineOps = await getServiceAvailableOperatorIds();
 
       let targetList = [];
+      
       if (isSorocaba) {
         console.log(`[${requestId}] 🏠 Fila Sorocaba.`);
         targetList = SOROCABA_OPERATOR_IDS.filter(id => onlineOps.has(id));
@@ -298,19 +288,20 @@ app.post("/", async (req, res) => {
         assignedOperatorId = Number(targetList[idx]);
         generalRoundRobinIndex++;
       }
-      
+
       if (assignedOperatorId) {
         const nomeOp = operatorNamesMap[assignedOperatorId] || assignedOperatorId;
         console.log(`[${requestId}] 👉 Atribuindo para: ${nomeOp}`);
         await assignContactToOperator(contactId, assignedOperatorId, requestId);
       }
     } else {
-        console.log(`[${requestId}] 🔒 Contato já tem dono: ${assignedOperatorId}`);
+        const nomeOp = operatorNamesMap[assignedOperatorId] || assignedOperatorId;
+        console.log(`[${requestId}] 🔒 Contato já pertence a: ${nomeOp}`);
     }
 
     // 5. ENVIAR MENSAGEM
     const operatorName = operatorNamesMap[assignedOperatorId] || "Consultor";
-    const channelToSend = contactDetails?.externals?.[0]?.channel_id || CHANNEL_ID;
+    const channelToSend = (contactDetails?.externals?.[0]?.channel_id) || CHANNEL_ID;
 
     // Verifica cooldown de envio
     const sendKey = `${contactId}:${sel.chosenTemplate}`;
@@ -320,62 +311,61 @@ app.post("/", async (req, res) => {
     }
 
     await sendTemplateMessage(contactId, assignedOperatorId, name, operatorName, channelToSend, sel.chosenTemplate, requestId);
-    console.log(`[${requestId}] 🚀 Mensagem enviada!`);
+    console.log(`[${requestId}] 🚀 Mensagem enviada com sucesso!`);
     
     recentSends.set(sendKey, { ts: Date.now() });
-    return res.status(200).json({ status: "Sucesso." });
+    return res.status(200).json({ status: "Sucesso" });
 
   } catch (error) {
     recentLeads.delete(idemKey);
     console.error(`[${requestId}] ❌ Erro:`, error.response?.data || error.message);
-    return res.status(500).json({ status: "Erro interno." });
+    return res.status(500).json({ status: "Erro interno" });
   }
 });
 
-// ================== FUNÇÕES AUXILIARES ==================
+// ================== FUNÇÕES AUXILIARES DE API ==================
 
-// 1. Criar Contato (CORRIGIDA: URLSearchParams)
+// 1. Criar Contato (FORM DATA OBRIGATÓRIO)
 async function ensureContactExists(name, phone, reqId, extras) {
-  const url = `/customers/${CUSTOMER_ID}/contacts`;
-  const form = new URLSearchParams();
-  form.append("name", name);
-  form.append("phone", phone);
-  if (extras.email) form.append("email", extras.email);
-  if (extras.propertyCode) form.append("cpf", String(extras.propertyCode).padStart(11, "0"));
+    const form = new URLSearchParams();
+    form.append("name", name);
+    form.append("phone", phone);
+    if (extras.email) form.append("email", extras.email);
+    if (extras.propertyCode) form.append("cpf", String(extras.propertyCode).padStart(11, "0"));
 
-  try {
-    // Sobrescreve header para form-urlencoded
-    const res = await postWithRetry(url, form, {
-        headers: { "Content-Type": "application/x-www-form-urlencoded" }
-    }, reqId, "create_contact");
-    return res.data?.data?.id || res.data?.id;
-  } catch (err) {
-    const existingId = err.response?.data?.contact?.id;
-    if (existingId) {
-        console.log(`[${reqId}] Contato já existe: ${existingId}`);
-        return existingId;
+    try {
+        const res = await postWithRetry(`/customers/${CUSTOMER_ID}/contacts`, form, {
+            headers: { "Content-Type": "application/x-www-form-urlencoded" }
+        }, reqId, "create_contact");
+        
+        return res.data?.data?.id || res.data?.id;
+    } catch (err) {
+        const existingId = err.response?.data?.contact?.id;
+        if (existingId) {
+            console.log(`[${reqId}] Contato já existe: ${existingId}`);
+            return existingId;
+        }
+        throw err;
     }
-    throw err;
-  }
 }
 
-// 2. Detalhes
+// 2. Detalhes (JSON)
 async function getContactDetails(id, reqId) {
     const res = await httpClient.get(`/customers/${CUSTOMER_ID}/contacts/${id}`);
     return res.data?.data || res.data;
 }
 
-// 3. Atualizar
+// 3. Atualizar (JSON)
 async function updateContactFields(id, fields, reqId) {
     await putWithRetry(`/customers/${CUSTOMER_ID}/contacts/${id}`, fields, {}, reqId, "update");
 }
 
-// 4. Atribuir
+// 4. Atribuir (JSON)
 async function assignContactToOperator(contactId, userId, reqId) {
     await postWithRetry(`/customers/${CUSTOMER_ID}/contacts/redirect/contacts/${contactId}`, { user_id: userId }, {}, reqId, "assign");
 }
 
-// 5. Enviar Template (CORRIGIDA: URLSearchParams)
+// 5. Enviar Template (FORM DATA OBRIGATÓRIO)
 async function sendTemplateMessage(contactId, userId, contactName, opName, channelId, templateId, reqId) {
     const params = JSON.stringify([contactName, opName]);
     const form = new URLSearchParams();
@@ -388,11 +378,13 @@ async function sendTemplateMessage(contactId, userId, contactName, opName, chann
         { headers: { "Content-Type": "application/x-www-form-urlencoded" } },
         reqId, "send_msg"
     );
+    
+    if (res.data?.success === false) throw new Error("API retornou sucesso: false");
     return res.data;
 }
 
-// ================== START ==================
+// ================== START SERVER ==================
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, "0.0.0.0", () => {
-  console.log(`🚀 Servidor rodando na porta ${PORT}`);
+    console.log(`🚀 Servidor rodando na porta ${PORT}`);
 });
