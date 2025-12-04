@@ -475,27 +475,33 @@ app.post("/", async (req, res) => {
 // ================== FUNÇÕES ==================
 async function ensureContactExists(name, phoneDigits, reqId, extras = {}) {
   const url = `/customers/${CUSTOMER_ID}/contacts`;
+  
+  // CORREÇÃO CRUCIAL: Usando URLSearchParams para formato application/x-www-form-urlencoded
   const form = new URLSearchParams();
   form.append("name", name);
   form.append("phone", phoneDigits);
+  
   if (extras?.email) form.append("email", extras.email);
   if (extras?.propertyCode) form.append("cpf", String(extras.propertyCode).padStart(11, "0"));
 
   try {
     const resp = await postWithRetry(
-      url, form,
-      // API CLIENTE não precisa mudar, mas vamos garantir o header certo se usarmos axios direto
-      // Aqui usamos o httpClient criado lá em cima, que já tem o token certo
-      // ATENÇÃO: a função postWithRetry original usava http.post. 
-      // Ajustei a função postWithRetry abaixo para usar httpClient
-      {}, // config vazio pois httpClient já tem headers
-      reqId, "create_contact"
+      url, 
+      form, // Enviando objeto de formulário, não JSON
+      // headers já estão no httpClient, mas o axios detecta o form e ajusta o content-type
+      {}, 
+      reqId, 
+      "create_contact"
     );
+    
     const id = resp?.data?.data?.id ?? resp?.data?.id ?? resp?.data?.contact?.id ?? null;
+    
     if (!id) throw new Error("Criação de contato sem ID na resposta.");
     return id;
+
   } catch (error) {
     const maybeId = error?.response?.data?.contact?.id ?? error?.response?.data?.data?.id ?? error?.response?.data?.id ?? null;
+    
     if (maybeId) {
         console.log(`[${reqId}] Contato já existente encontrado com ID: ${maybeId}`);
         return maybeId;
