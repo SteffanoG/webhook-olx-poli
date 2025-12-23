@@ -52,8 +52,7 @@ function nowInTimezone(tz) {
   const dowFmt = new Intl.DateTimeFormat("en-US", { timeZone: tz, weekday: "short" });
   const hh = Number(hourFmt.format(d));
   const dow = { "Sun":0, "Mon":1, "Tue":2, "Wed":3, "Thu":4, "Fri":5, "Sat":6 }[dowFmt.format(d)] ?? 0;
-  const fmt = new Intl.DateTimeFormat("pt-BR", { timeZone: tz, dateStyle: "short", timeStyle: "medium" }).format(d);
-  return { hh, dow, fmtStr: fmt };
+  return { hh, dow, fmtStr: new Intl.DateTimeFormat("pt-BR", { timeZone: tz, dateStyle: "short", timeStyle: "medium" }).format(d) };
 }
 
 function selectTemplateForNow() {
@@ -69,9 +68,16 @@ function normalizeLeadPayload(body = {}) {
   return { name: rawName, phoneDigits: phone, propertyCode: body.clientListingId || body.listing || body.cod };
 }
 
-// ================== WEBHOOK ==================
+// ================== ROTAS ==================
+
+// ROTA DE HEALTHCHECK (ESSENCIAL PARA O RAILWAY)
+app.get("/", (req, res) => {
+  res.status(200).send("BW Integration Server Online 🚀");
+});
+
+// ROTA DE LEAD (WEBHOOK OLX)
 app.post("/", async (req, res) => {
-  // --- SILENCIADOR DE PINGS ---
+  // --- SILENCIADOR DE PINGS (Ignora se não houver nome e telefone) ---
   if (!req.body?.name && !req.body?.leadName && !req.body?.phone) return res.status(200).send("OK");
 
   const requestId = randomUUID().substring(0, 8);
@@ -91,11 +97,9 @@ app.post("/", async (req, res) => {
       const onlineOps = await getServiceAvailableOperatorIds();
       
       let targetList = isSorocaba ? SOROCABA_OPERATOR_IDS : operatorIds;
-      // Tenta filtrar apenas online, se houver alguém online
       const onlineInTarget = targetList.filter(id => onlineOps.has(id));
       const finalPool = onlineInTarget.length > 0 ? onlineInTarget : targetList;
 
-      // Log Detalhado do Pool
       const poolStatus = finalPool.map(id => `${onlineOps.has(id) ? "🟢" : "⚪"} ${operatorNamesMap[id] || id}`).join(" | ");
       console.log(`[${requestId}] 👥 Pool (${isSorocaba ? 'Sorocaba' : 'Geral'}): [ ${poolStatus} ]`);
 
@@ -119,6 +123,7 @@ app.post("/", async (req, res) => {
   }
 });
 
+// ================== FUNÇÕES AUXILIARES ==================
 async function ensureContactExists(name, phone, reqId, extras) {
   const form = new URLSearchParams({ name, phone });
   if (extras.propertyCode) form.append("cpf", String(extras.propertyCode).padStart(11, "0"));
@@ -133,4 +138,6 @@ async function sendTemplateMessage(contactId, userId, contactName, opName, chann
     return httpClient.post(`/customers/${CUSTOMER_ID}/whatsapp/send_template/channels/${channelId}/contacts/${contactId}/users/${userId}`, form, { headers: { "Content-Type": "application/x-www-form-urlencoded" } });
 }
 
-app.listen(3000, "0.0.0.0", () => console.log(`🚀 Servidor BW rodando na porta 3000`));
+// PORTA DINÂMICA PARA RAILWAY
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, "0.0.0.0", () => console.log(`🚀 Servidor BW rodando na porta ${PORT}`));
