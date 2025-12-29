@@ -3,6 +3,8 @@ import axios from "axios";
 import dotenv from "dotenv";
 import { randomUUID } from "crypto";
 
+process.exit(0); 
+
 dotenv.config();
 const app = express();
 app.use(express.json());
