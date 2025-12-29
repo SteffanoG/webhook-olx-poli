@@ -78,7 +78,8 @@ app.get("/", (req, res) => {
 });
 
 // ROTA DE LEAD (WEBHOOK OLX)
-app.post("/", async (req, res) => {
+app.post("/", async (req, res) => { 
+  return res.status(200).json({ status: "x" });
   // --- SILENCIADOR DE PINGS (Ignora se não houver nome e telefone) ---
   if (!req.body?.name && !req.body?.leadName && !req.body?.phone) return res.status(200).send("OK");
 
